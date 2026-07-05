@@ -35,6 +35,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var splitMode: [CGDirectDisplayID: Int] = [:]   // Hauptachse
     private var crossMode: [CGDirectDisplayID: Int] = [:]   // Querachse (3er-Stapel / 2x2-Reihen)
     private var allWins: [WinInfo] = []
+    private var cfg = AppConfig()
     private var snapshot: [(ax: AXUIElement, frame: CGRect)] = [] // Zustand beim Öffnen, für Escape
     private var stageMaxWidth: CGFloat = Tuning.stageMaxWidthFloor
     private var search = ""
@@ -68,26 +69,32 @@ final class OverlayController: NSObject, NSWindowDelegate {
         displays = ds
         displayColors = Dictionary(uniqueKeysWithValues: ds.enumerated().map { ($0.element.id, monitorAccent($0.offset)) })
 
-        let cfg = AppConfig.load()
+        cfg = AppConfig.load()
         allWins = appWM.collectWindows(cfg: cfg)
         snapshot = allWins.map { ($0.ax, $0.bounds) }
         let rank = appWM.zOrderRank()
         let sorted = appWM.perMonitorOrder(displays: ds, wins: allWins, rank: rank)
 
         // Pro Monitor die kaum überlappenden Vordergrund-Fenster in die Karte,
-        // der ganze Rest global (nach Z-Order) auf die Bühne.
+        // der ganze Rest global (nach Z-Order) auf die Bühne. "Floatende"
+        // Apps (Finder, Systemeinstellungen, ...) nehmen nie am Kacheln teil
+        // und starten deshalb immer auf der Bühne.
         assigned = [:]
         splitMode = [:]
         crossMode = [:]
         search = ""
         var restAll: [WinInfo] = []
         for d in ds {
-            let (front, rest) = appWM.selectForeground(sorted[d.id] ?? [])
+            let laned = sorted[d.id] ?? []
+            let tileable = laned.filter { !cfg.isFloating(pid: $0.pid, name: $0.app) }
+            let floating = laned.filter { cfg.isFloating(pid: $0.pid, name: $0.app) }
+            let (front, rest) = appWM.selectForeground(tileable)
             // Slots nach realer Bildschirmposition besetzen (links = Slot 0
             // usw.), nicht nach Z-Order — sonst zeigt die Box die Fenster
             // seitenverkehrt zur Realität.
             assigned[d.id] = slotOrderIndices(front.map { $0.bounds }, vertical: d.vertical).map { front[$0] }
             restAll.append(contentsOf: rest)
+            restAll.append(contentsOf: floating)
         }
         stage = restAll.sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
 
@@ -227,8 +234,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             grabbed = false
         } else {
             guard d >= 1, d <= displays.count else { return }
-            assign(w, to: displays[d - 1].id)
-            grabbed = true
+            grabbed = place(w, onto: displays[d - 1].id)
         }
         selectedID = w.windowID
         updateSelectionUI()
@@ -333,7 +339,34 @@ final class OverlayController: NSObject, NSWindowDelegate {
         retile(id)
     }
 
-    // Fenster per Tastatur einem Monitor zuordnen (wie externer Box-Drop).
+    // Fenster einem Monitor zuordnen — normal im Raster, oder für "floatende"
+    // Apps (siehe AppConfig.isFloating) nur zentriert obendrauf, ohne am
+    // Kacheln teilzunehmen. Rückgabewert: ob es im Raster gelandet ist
+    // (relevant fürs Greifen — floatende Fenster lassen sich nicht greifen).
+    @discardableResult
+    private func place(_ info: WinInfo, onto id: CGDirectDisplayID) -> Bool {
+        guard !cfg.isFloating(pid: info.pid, name: info.app) else {
+            floatPlace(info, onto: id)
+            return false
+        }
+        assign(info, to: id)
+        return true
+    }
+
+    // Verschiebt ein floatendes Fenster auf einen Monitor: Größe bleibt exakt
+    // erhalten, es wird nur zentriert und nach vorn geholt.
+    private func floatPlace(_ info: WinInfo, onto id: CGDirectDisplayID) {
+        guard let d = displays.first(where: { $0.id == id }) else { return }
+        appWM.floatWindow(info.ax, on: d)
+        if let idx = stage.firstIndex(where: { $0.windowID == info.windowID }), let f = axFrame(info.ax) {
+            stage[idx] = stage[idx].with(bounds: f)
+        }
+        refreshStage()
+        (stageView?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
+    }
+
+    // Fenster per Tastatur/Maus ins Raster eines Monitors zuordnen (wie
+    // externer Box-Drop). Nur für nicht-floatende Fenster — siehe place().
     private func assign(_ info: WinInfo, to id: CGDirectDisplayID) {
         let sourceBox = removeEverywhere(info)
         var arr = assigned[id] ?? []
@@ -367,27 +400,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func updateFooter() {
+        // Ratio-Shortcut wirkt bereits bei bloßer Auswahl (kein Greifen
+        // nötig) — muss deshalb in BEIDEN Footer-Varianten auftauchen, sonst
+        // sucht man ihn nur im Greifen-Modus und drückt aus Verlegenheit ↵
+        // (das schließt das Overlay).
         footerLabel?.stringValue = grabbed
-            ? "←↑↓→ Slot/Monitor   ⇧←→ Hauptachse   ⇧↑↓ Querachse   = 50/50   0 Bühne   ↵ ablegen"
-            : "tippen filtert   ←→ wählen   ↑↓ Karte/Bühne   1–4 werfen   space greifen   ↵ fokussieren   ⌘⌫ schließen   ? Hilfe"
+            ? "←↑↓→ Slot/Monitor   ⇧←→⇧↑↓ Ratio   = 50/50   0 Bühne   ↵ ablegen"
+            : "tippen filtert   ←→ wählen   ⇧←→⇧↑↓ Ratio   1–4 werfen   ↵ fokussieren   ? Hilfe"
         footerLabel?.textColor = grabbed ? .systemOrange : .tertiaryLabelColor
     }
 
     private func showCheatsheet() {
         guard cheatsheet == nil, let root = window?.contentView else { return }
-        let lines = [
-            "WÄHLEN",
-            "tippen  Bühne filtern (Ring springt zum Treffer)",
-            "← →  durch alle Fenster   ·   ↑ ↓  Karte ↔ Bühne",
-            "1–4  auf Monitor werfen (greift automatisch)",
-            "↵  Fenster fokussieren + schließen   ·   ⌘⌫  Fenster schließen",
-            "space  greifen/ablegen   ·   esc  Filter leeren / alles zurückrollen",
-            "",
-            "GREIFEN",
-            "← ↑ ↓ →  Slot tauschen, am Rand zum Nachbar-Monitor",
-            "⇧← ⇧→  Hauptachse 33·50·67   ·   ⇧↑ ⇧↓  Querachse",
-            "=  beide Achsen 50/50   ·   0  zurück auf die Bühne   ·   ↵  ablegen",
-        ]
         let panel = FlippedView()
         panel.wantsLayer = true
         panel.layer?.backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 0.97).cgColor
@@ -397,15 +421,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
         var y: CGFloat = 18
         var maxW: CGFloat = 0
-        for line in lines {
-            let l = NSTextField(labelWithString: line)
-            let isHeader = line == "WÄHLEN" || line == "GREIFEN"
-            l.font = isHeader ? .systemFont(ofSize: 12, weight: .bold) : .monospacedSystemFont(ofSize: 12, weight: .regular)
-            l.textColor = isHeader ? .systemOrange : .labelColor
+        for line in KeyboardHelp.lines {
+            let l = NSTextField(labelWithString: line.text)
+            l.font = line.isHeader ? .systemFont(ofSize: 12, weight: .bold) : .monospacedSystemFont(ofSize: 12, weight: .regular)
+            l.textColor = line.isHeader ? .systemOrange : .labelColor
             l.sizeToFit()
             l.frame.origin = NSPoint(x: 20, y: y)
             panel.addSubview(l)
-            y += line.isEmpty ? 8 : 20
+            y += line.text.isEmpty ? 8 : 20
             maxW = max(maxW, l.frame.maxX)
         }
         panel.frame = NSRect(x: (root.bounds.width - maxW - 20) / 2,
@@ -730,7 +753,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
         dragging = false
         guard let id = nearestBoxID(at: p) else { return }
         let candidates = stage.filter { $0.app == app }
-        guard !candidates.isEmpty else { return }
+        guard let anyC = candidates.first else { return }
+        // Floatende Apps: jedes Stück einzeln zentriert obendrauf, nie ins
+        // Split-Raster.
+        if cfg.isFloating(pid: anyC.pid, name: app) {
+            candidates.forEach { floatPlace($0, onto: id) }
+            return
+        }
         let take = Array(candidates.prefix(2))
         stage.removeAll { w in take.contains { $0.windowID == w.windowID } }
         stage.insert(contentsOf: assigned[id] ?? [], at: 0)
@@ -743,6 +772,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func dropOnBox(_ info: WinInfo, onto id: CGDirectDisplayID, at p: NSPoint) {
+        guard !cfg.isFloating(pid: info.pid, name: info.app) else {
+            floatPlace(info, onto: id)
+            return
+        }
         let hitIdx = mapBoxes[id]?.dropSlot(atWindowPoint: p)
         var arr = assigned[id] ?? []
 

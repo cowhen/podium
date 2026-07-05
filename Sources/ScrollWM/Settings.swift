@@ -133,10 +133,48 @@ final class ShortcutRecorderButton: NSButton {
     }
 }
 
-// Kleines Einstellungsfenster: Kurzbefehl + Monitor-Farben.
+// Mehrzeiliger Text-Editor (App-Namen, eine Zeile pro App) mit fester Höhe.
+// Meldet Änderungen per onChange, statt sich selbst um Persistenz zu kümmern.
+final class AppListEditor: NSScrollView, NSTextViewDelegate {
+    let textView = NSTextView()
+    var onChange: (([String]) -> Void)?
+
+    init(lines: [String], height: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: height))
+        borderType = .bezelBorder
+        hasVerticalScroller = true
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: height).isActive = true
+        widthAnchor.constraint(equalToConstant: 372).isActive = true
+
+        textView.string = lines.joined(separator: "\n")
+        textView.font = .systemFont(ofSize: 12)
+        textView.isRichText = false
+        textView.delegate = self
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.minSize = NSSize(width: 0, height: height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        documentView = textView
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func textDidChange(_ notification: Notification) {
+        let names = textView.string.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        onChange?(names)
+    }
+}
+
+// Einstellungsfenster: Kurzbefehl, Monitor-Farben, App-Listen, Tastatur-Referenz.
 final class SettingsWindowController: NSWindowController {
+    private var cfg = AppConfig.load()
+
     convenience init() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 320),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "PODIUM Einstellungen"
         win.isReleasedWhenClosed = false
@@ -155,15 +193,10 @@ final class SettingsWindowController: NSWindowController {
 
         content.addArrangedSubview(separator())
 
-        let header = label("Monitor-Farben")
-        header.font = .systemFont(ofSize: 13, weight: .semibold)
+        let header = sectionHeader("Monitor-Farben")
         content.addArrangedSubview(header)
 
-        let hint = label("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts).")
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        hint.lineBreakMode = .byWordWrapping
-        hint.preferredMaxLayoutWidth = 340
+        let hint = hintLabel("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts).")
         content.addArrangedSubview(hint)
 
         let colors = SettingsStore.shared.monitorColors
@@ -183,6 +216,43 @@ final class SettingsWindowController: NSWindowController {
 
         let reset = NSButton(title: "Standardfarben", target: self, action: #selector(resetColors(_:)))
         content.addArrangedSubview(reset)
+
+        content.addArrangedSubview(separator())
+
+        // App-Listen: ignorierte Apps tauchen im Overlay gar nicht auf,
+        // floatende bleiben sichtbar, nehmen aber nie am Kacheln teil.
+        content.addArrangedSubview(sectionHeader("Ausgeschlossene Apps"))
+        content.addArrangedSubview(hintLabel("Ignoriert — erscheinen gar nicht im Overlay (ein App-Name pro Zeile)."))
+        let ignoreEditor = AppListEditor(lines: cfg.ignoreNames, height: 60)
+        ignoreEditor.onChange = { [weak self] names in
+            self?.cfg.ignoreNames = names
+            self?.cfg.save()
+        }
+        content.addArrangedSubview(ignoreEditor)
+
+        content.addArrangedSubview(hintLabel("Floatend — bleiben sichtbar, werden nie gekachelt (z. B. Finder).") )
+        let floatEditor = AppListEditor(lines: cfg.floatingNames, height: 60)
+        floatEditor.onChange = { [weak self] names in
+            self?.cfg.floatingNames = names
+            self?.cfg.save()
+        }
+        content.addArrangedSubview(floatEditor)
+        let floatHint = hintLabel("Finder und Systemeinstellungen sind zusätzlich fest per Bundle-ID hinterlegt.")
+        content.addArrangedSubview(floatHint)
+
+        content.addArrangedSubview(separator())
+
+        // Tastatur-Referenz: dieselbe Quelle wie das "?"-Cheatsheet im Overlay.
+        content.addArrangedSubview(sectionHeader("Tastatur-Kürzel im Overlay"))
+        for line in KeyboardHelp.lines where !line.text.isEmpty {
+            let l = NSTextField(labelWithString: line.text)
+            l.font = line.isHeader ? .systemFont(ofSize: 12, weight: .bold)
+                                   : .monospacedSystemFont(ofSize: 11, weight: .regular)
+            l.textColor = line.isHeader ? .secondaryLabelColor : .labelColor
+            l.lineBreakMode = .byWordWrapping
+            l.preferredMaxLayoutWidth = 360
+            content.addArrangedSubview(l)
+        }
 
         win.contentView = content
         win.setContentSize(content.fittingSize)
@@ -212,10 +282,25 @@ private func label(_ s: String) -> NSTextField {
     return l
 }
 
+private func sectionHeader(_ s: String) -> NSTextField {
+    let l = NSTextField(labelWithString: s)
+    l.font = .systemFont(ofSize: 13, weight: .semibold)
+    return l
+}
+
+private func hintLabel(_ s: String) -> NSTextField {
+    let l = NSTextField(labelWithString: s)
+    l.font = .systemFont(ofSize: 11)
+    l.textColor = .secondaryLabelColor
+    l.lineBreakMode = .byWordWrapping
+    l.preferredMaxLayoutWidth = 360
+    return l
+}
+
 private func separator() -> NSBox {
     let b = NSBox()
     b.boxType = .separator
     b.translatesAutoresizingMaskIntoConstraints = false
-    b.widthAnchor.constraint(equalToConstant: 352).isActive = true
+    b.widthAnchor.constraint(equalToConstant: 372).isActive = true
     return b
 }

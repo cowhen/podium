@@ -111,6 +111,15 @@ final class WindowManager {
         tileShown(shown, frames: frames, vertical: display.vertical)
     }
 
+    // Für "floatende" Apps (siehe AppConfig.isFloating): Größe unangetastet,
+    // nur auf dem Monitor zentriert und nach vorn geholt.
+    func floatWindow(_ ax: AXUIElement, on display: Display) {
+        guard let f = axFrame(ax) else { axRaise(ax); return }
+        let area = display.visible
+        axSetFrame(ax, CGRect(x: area.midX - f.width / 2, y: area.midY - f.height / 2, width: f.width, height: f.height))
+        axRaise(ax)
+    }
+
     // Setzt die Frames der Fenster. Jedes Fenster wird an der TATSÄCHLICH
     // gesetzten Kante seines linken/oberen Raster-Nachbarn verankert (statt an
     // der berechneten), da manche Apps eine Mindestgröße erzwingen — sonst
