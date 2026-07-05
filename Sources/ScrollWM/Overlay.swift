@@ -28,12 +28,29 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var mapBoxes: [CGDirectDisplayID: MonitorMapBox] = [:]
     private var stageView: StageView?
     private var searchLabel: NSTextField?
-    private var assigned: [CGDirectDisplayID: [WinInfo]] = [:]    // Box-Inhalt, dicht, max 4
-    private var stage: [WinInfo] = []                             // alle nicht zugeordneten Fenster
+    // Der pure Zuordnungs-Kern (Box-Inhalte, Bühne, Split-Stufen) lebt
+    // getrennt vom Controller in ArrangementModel — dort ist er testbar.
+    // Die Passthrough-Properties halten die bestehenden Lese-/Schreibstellen
+    // im Controller unverändert.
+    private var model = ArrangementModel()
+    private var assigned: [CGDirectDisplayID: [WinInfo]] {
+        get { model.assigned }
+        set { model.assigned = newValue }
+    }
+    private var stage: [WinInfo] {
+        get { model.stage }
+        set { model.stage = newValue }
+    }
+    private var splitMode: [CGDirectDisplayID: Int] {
+        get { model.splitMode }
+        set { model.splitMode = newValue }
+    }
+    private var crossMode: [CGDirectDisplayID: Int] {
+        get { model.crossMode }
+        set { model.crossMode = newValue }
+    }
     private var displays: [Display] = []
     private var displayColors: [CGDirectDisplayID: NSColor] = [:]
-    private var splitMode: [CGDirectDisplayID: Int] = [:]   // Hauptachse
-    private var crossMode: [CGDirectDisplayID: Int] = [:]   // Querachse (3er-Stapel / 2x2-Reihen)
     private var allWins: [WinInfo] = []
     private var cfg = AppConfig()
     private var snapshot: [(ax: AXUIElement, frame: CGRect)] = [] // Zustand beim Öffnen, für Escape
@@ -300,7 +317,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             if ok, abs(dx) + abs(dy) < bestScore { bestScore = abs(dx) + abs(dy); best = i }
         }
         if let b = best {
-            assigned[id]?.swapAt(idx, b)
+            model.swapInBox(id, idx, b)
             retile(id)
         } else if let nid = neighborDisplay(of: id, dir: dir) {
             assign(w, to: nid)
@@ -328,11 +345,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func stepRatio(_ id: CGDirectDisplayID, main: Bool, up: Bool) {
-        // Rast-Reihenfolge entlang "erste Gruppe wächst": 33 -> 50 -> 67.
-        let order = [2, 0, 1]
         let current = main ? (splitMode[id] ?? 0) : (crossMode[id] ?? 0)
-        let i = order.firstIndex(of: current) ?? 1
-        let next = order[max(0, min(order.count - 1, i + (up ? 1 : -1)))]
+        let next = ArrangementModel.stepMode(current, up: up)
         guard next != current else { return }
         if main { splitMode[id] = next } else { crossMode[id] = next }
         retile(id)
@@ -374,15 +388,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Fenster per Tastatur/Maus ins Raster eines Monitors zuordnen (wie
     // externer Box-Drop). Nur für nicht-floatende Fenster — siehe place().
     private func assign(_ info: WinInfo, to id: CGDirectDisplayID) {
-        let sourceBox = removeEverywhere(info)
-        var arr = assigned[id] ?? []
-        if arr.count < Tuning.maxAssigned {
-            arr.append(info)
-        } else {
-            stage.insert(arr[arr.count - 1], at: 0)
-            arr[arr.count - 1] = info
-        }
-        assigned[id] = arr
+        let sourceBox = model.dropFromOutside(info, onto: id)
         retile(id)
         if let sourceBox, sourceBox != id { retile(sourceBox) }
         refreshStage()
@@ -643,7 +649,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func boxOwner(of info: WinInfo) -> CGDirectDisplayID? {
-        assigned.first { $0.value.contains { $0.windowID == info.windowID } }?.key
+        model.boxOwner(of: info.windowID)
     }
 
     // MARK: Hover & Vorschau
@@ -787,25 +793,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
             return
         }
         let hitIdx = mapBoxes[id]?.dropSlot(atWindowPoint: p)
-        var arr = assigned[id] ?? []
 
-        if let from = arr.firstIndex(where: { $0.windowID == info.windowID }) {
+        if let from = assigned[id]?.firstIndex(where: { $0.windowID == info.windowID }) {
             // Innerhalb derselben Box: Plätze tauschen.
             guard let hit = hitIdx, hit != from else { return }
-            arr.swapAt(from, hit)
-            assigned[id] = arr
+            model.swapInBox(id, from, hit)
             retile(id)
         } else {
-            let sourceBox = removeEverywhere(info)
-            arr = assigned[id] ?? []
-            if arr.count < Tuning.maxAssigned {
-                arr.append(info)   // von außen: anhängen, Raster wächst
-            } else {
-                let slot = hitIdx ?? arr.count - 1
-                stage.insert(arr[slot], at: 0)
-                arr[slot] = info   // Box voll: gezielt ersetzen, Verdrängtes auf die Bühne
-            }
-            assigned[id] = arr
+            let sourceBox = model.dropFromOutside(info, onto: id, preferredSlot: hitIdx)
             retile(id)
             if let sourceBox, sourceBox != id { retile(sourceBox) }
             refreshStage()
@@ -814,9 +809,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func demote(_ info: WinInfo) {
-        guard let sourceBox = boxOwner(of: info) else { return }
-        assigned[sourceBox]?.removeAll { $0.windowID == info.windowID }
-        stage.append(info)
+        guard let sourceBox = model.demote(info) else { return }
         retile(sourceBox)
         refreshStage()
         (stageView?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
@@ -825,10 +818,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Entfernt das Fenster überall und liefert die Box zurück, in der es war.
     @discardableResult
     private func removeEverywhere(_ info: WinInfo) -> CGDirectDisplayID? {
-        stage.removeAll { $0.windowID == info.windowID }
-        let sourceBox = boxOwner(of: info)
-        if let sourceBox { assigned[sourceBox]?.removeAll { $0.windowID == info.windowID } }
-        return sourceBox
+        model.removeEverywhere(info.windowID)
     }
 
     // MARK: Klicks
@@ -848,25 +838,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         for (id, arr) in assigned {
             guard arr.count >= 2, let idx = arr.firstIndex(where: { $0.windowID == info.windowID }) else { continue }
-            // Hauptachsen-Gruppe: 2er/3er Slot 0 vs. Rest, 2x2 linke vs.
-            // rechte Spalte (zeilen-major: gerade Slots = links).
-            let mainFavor = (arr.count == 4 ? idx % 2 == 0 : idx == 0) ? 1 : 2
-            // Querachsen-Gruppe: 3er-Stapel Slot 1 vs. 2, 2x2 obere vs.
-            // untere Reihe. Das große Fenster im 3er hat keine Querachse.
-            let crossFavor: Int? = switch arr.count {
-            case 3 where idx > 0: idx == 1 ? 1 : 2
-            case 4: idx < 2 ? 1 : 2
-            default: nil
-            }
-
-            if (splitMode[id] ?? 0) != mainFavor {
-                splitMode[id] = mainFavor
-            } else if let crossFavor, (crossMode[id] ?? 0) != crossFavor {
-                crossMode[id] = crossFavor
-            } else {
-                splitMode[id] = 0
-                crossMode[id] = 0
-            }
+            let next = ArrangementModel.clickCycle(count: arr.count, idx: idx,
+                                                   main: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
+            splitMode[id] = next.main
+            crossMode[id] = next.cross
             retile(id)
             return
         }
