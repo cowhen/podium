@@ -27,9 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func start() {
         applyHotkey()
+        DirectActions.register()
         RestoreCenter.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: SettingsStore.changed, object: nil)
+        Onboarding.showIfNeeded()
     }
 
     // Kurzbefehl aus den Einstellungen (neu) registrieren; Menü-Titel spiegeln.

@@ -244,7 +244,7 @@ final class SettingsWindowController: NSWindowController {
 
         // Tastatur-Referenz: dieselbe Quelle wie das "?"-Cheatsheet im Overlay.
         content.addArrangedSubview(sectionHeader("Tastatur-Kürzel im Overlay"))
-        for line in KeyboardHelp.lines where !line.text.isEmpty {
+        for line in KeyboardHelp.lines + KeyboardHelp.globalLines where !line.text.isEmpty {
             let l = NSTextField(labelWithString: line.text)
             l.font = line.isHeader ? .systemFont(ofSize: 12, weight: .bold)
                                    : .monospacedSystemFont(ofSize: 11, weight: .regular)
