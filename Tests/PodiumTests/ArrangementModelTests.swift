@@ -1,6 +1,6 @@
 import XCTest
 import ApplicationServices
-@testable import ScrollWM
+@testable import Podium
 
 final class ArrangementModelTests: XCTestCase {
     private let d1: CGDirectDisplayID = 1

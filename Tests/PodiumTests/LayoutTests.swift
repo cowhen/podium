@@ -1,5 +1,5 @@
 import XCTest
-@testable import ScrollWM
+@testable import Podium
 
 final class LayoutTests: XCTestCase {
     let area = CGRect(x: 0, y: 0, width: 1000, height: 600)

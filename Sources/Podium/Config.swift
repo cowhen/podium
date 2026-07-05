@@ -21,10 +21,21 @@ struct AppConfig {
 
     static var path: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".config/scrollwm/config.json")
+        return home.appendingPathComponent(".config/podium/config.json")
+    }
+
+    // Einmalige Migration vom alten Projektnamen (scrollwm -> podium): die
+    // bestehende Config wird kopiert, das alte Verzeichnis bleibt unangetastet.
+    private static func migrateLegacyConfig() {
+        let fm = FileManager.default
+        let old = fm.homeDirectoryForCurrentUser.appendingPathComponent(".config/scrollwm/config.json")
+        guard !fm.fileExists(atPath: path.path), fm.fileExists(atPath: old.path) else { return }
+        try? fm.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.copyItem(at: old, to: path)
     }
 
     static func load() -> AppConfig {
+        migrateLegacyConfig()
         ensureTemplate()
         guard let data = try? Data(contentsOf: path),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

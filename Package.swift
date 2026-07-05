@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "ScrollWM",
+    name: "Podium",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "ScrollWM",
-            path: "Sources/ScrollWM",
+            name: "Podium",
+            path: "Sources/Podium",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "ScrollWMTests",
-            dependencies: ["ScrollWM"],
-            path: "Tests/ScrollWMTests",
+            name: "PodiumTests",
+            dependencies: ["Podium"],
+            path: "Tests/PodiumTests",
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]

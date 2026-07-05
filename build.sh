@@ -7,7 +7,7 @@ swift build -c release
 APP="Podium.app"
 rm -rf "$APP" ScrollWM.app
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/ScrollWM "$APP/Contents/MacOS/Podium"
+cp .build/release/Podium "$APP/Contents/MacOS/Podium"
 cp bundle/Info.plist "$APP/Contents/Info.plist"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp assets/MenuIconTemplate.png assets/MenuIconTemplate@2x.png "$APP/Contents/Resources/"
