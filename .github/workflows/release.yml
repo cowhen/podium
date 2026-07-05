@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version from tag
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $V" bundle/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $V" bundle/Info.plist
+
+      - name: Build app bundle (ad-hoc signed)
+        run: ./build.sh
+
+      - name: Zip
+        run: ditto -c -k --keepParent Podium.app "Podium-${GITHUB_REF_NAME}.zip"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Podium-*.zip
+          generate_release_notes: true
+          body: |
+            Ad-hoc signed build — macOS will warn on first launch.
+            Right-click → Open once, then grant Accessibility and
+            Screen Recording under System Settings → Privacy & Security.
