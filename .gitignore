@@ -1,0 +1,7 @@
+.DS_Store
+.build/
+Podium.app/
+ScrollWM.app/
+*.o
+spike/cgs_spike
+spike/cgs_spike2
