@@ -402,7 +402,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         // Karte: bei aktivem Filter Nicht-Treffer abdunkeln, Treffer leuchten.
         for box in mapBoxes.values {
-            for t in box.tiles { t.setDimmed(!search.isEmpty && !matchesSearch(t.info)) }
+            for t in box.tiles + box.ghostTiles { t.setDimmed(!search.isEmpty && !matchesSearch(t.info)) }
         }
         // Im Greifen-Modus glüht die Box, die das Fenster gerade hält.
         for (id, box) in mapBoxes {
@@ -494,7 +494,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                            width: d.full.width * scale, height: d.full.height * scale)
             let box = MonitorMapBox(display: d, number: i + 1, accent: displayColors[d.id] ?? .controlAccentColor,
                                     frame: f, controller: self)
-            box.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0, cross: crossMode[d.id] ?? 0)
+            box.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0, cross: crossMode[d.id] ?? 0, ghosts: ghostWins(for: d.id))
             mapBoxes[d.id] = box
             mapWidth = max(mapWidth, f.maxX)
             mapHeight = max(mapHeight, f.maxY)
@@ -630,6 +630,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func isFloatingWin(_ w: WinInfo) -> Bool {
         cfg.isFloating(pid: w.pid, name: w.app)
+    }
+
+    // Bühnen-Fenster, die real auf diesem Monitor liegen — als Geister-Kacheln
+    // in der Box, damit die Karte den vollständigen Ist-Zustand zeigt.
+    private func ghostWins(for id: CGDirectDisplayID) -> [WinInfo] {
+        stage.filter { displayID(containing: CGPoint(x: $0.bounds.midX, y: $0.bounds.midY), in: displays) == id }
     }
 
     // MARK: Treffer-Ermittlung
@@ -900,7 +906,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             assigned[id] = fresh
         }
-        mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
+        mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0, ghosts: ghostWins(for: id))
         updateSelectionUI()
         // Manche Apps (v.a. Electron wie Teams) wenden das Setzen verzögert
         // an — der sofortige Readback zeigt dann noch alte Bounds. Später den
@@ -926,7 +932,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // neue Kachel den Abzug von VOR dem Kacheln (falsche Größe/Proportion).
         changed.forEach { ThumbnailCache.shared.remove($0) }
         assigned[id] = fresh
-        mapBoxes[id]?.setAssigned(fresh, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
+        mapBoxes[id]?.setAssigned(fresh, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0, ghosts: ghostWins(for: id))
         updateSelectionUI()
     }
 
@@ -947,6 +953,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         stageV.setWindows(list, filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
+        // Geister-Kacheln folgen dem Bühnen-Inhalt (z. B. nach Zuordnen/Lösen).
+        for d in displays {
+            mapBoxes[d.id]?.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0,
+                                        cross: crossMode[d.id] ?? 0, ghosts: ghostWins(for: d.id))
+        }
         resizeToFitStage()
         updateSelectionUI()
     }

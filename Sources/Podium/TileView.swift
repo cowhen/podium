@@ -16,11 +16,15 @@ final class WindowTileView: NSView {
     private var dragStart: NSPoint?
     private var ghost: NSImageView?
 
+    private let isGhost: Bool
+
     init(info: WinInfo, isVisible: Bool, controller: OverlayController, frame: NSRect,
-         accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false) {
+         accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false,
+         isGhost: Bool = false) {
         self.info = info
         self.isVisible = isVisible
         self.accent = accent
+        self.isGhost = isGhost
         self.controller = controller
         super.init(frame: frame)
         wantsLayer = true
@@ -120,7 +124,10 @@ final class WindowTileView: NSView {
             : NSColor.white.withAlphaComponent(0.05)).cgColor
         layer?.borderWidth = isVisible ? 2 : 1
         layer?.borderColor = (isVisible ? accent : NSColor.white.withAlphaComponent(0.12)).cgColor
-        alphaValue = isVisible ? 1.0 : 0.75
+        // Geister-Kacheln: Hintergrund-Fenster in der Karte an ihrer echten
+        // Position — deutlich abgesetzt, damit klar ist, was NICHT zum
+        // Kachel-Raster gehört.
+        alphaValue = isGhost ? 0.45 : (isVisible ? 1.0 : 0.75)
         if kbSelected {
             layer?.borderWidth = 3
             layer?.borderColor = (kbGrabbed ? NSColor.systemOrange : NSColor.white).cgColor

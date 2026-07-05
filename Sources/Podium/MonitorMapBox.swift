@@ -64,6 +64,7 @@ final class MonitorMapBox: NSView {
     private lazy var crossHandle = SeamHandleView(kind: .cross, box: self)
     private let emptyHint = NSTextField(labelWithString: "Fenster hierher ziehen")
     private(set) var tiles: [WindowTileView] = []
+    private(set) var ghostTiles: [WindowTileView] = []   // Hintergrund-Fenster, nicht im Raster
     weak var controller: OverlayController?
 
     override var isFlipped: Bool { true }   // oben-links, wie überall sonst im Projekt
@@ -140,30 +141,47 @@ final class MonitorMapBox: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private func scaledRect(_ w: WinInfo) -> NSRect {
+        let full = display.full
+        return NSRect(x: (w.bounds.minX - full.minX) / full.width * bounds.width,
+                      y: (w.bounds.minY - full.minY) / full.height * bounds.height,
+                      width: w.bounds.width / full.width * bounds.width,
+                      height: w.bounds.height / full.height * bounds.height)
+    }
+
     // wins: dichte Liste (max 4), Index = Raster-Slot laut Layout.frames.
     // Gezeichnet werden die ECHTEN, auf die Box skalierten Fenster-Bounds —
     // wer ein Fenster auf dem Desktop umgroßt, sieht hier den Ist-Zustand,
-    // nicht das idealisierte Raster. Kacheln gleicher Fenster gleiten
-    // animiert an ihre neue Position, sofern sich nur die Position ändert.
-    func setAssigned(_ wins: [WinInfo], split: Int, cross: Int) {
+    // nicht das idealisierte Raster. ghosts sind die übrigen (Bühnen-)Fenster
+    // dieses Monitors: abgedunkelt an echter Position, damit die Karte den
+    // vollständigen Ist-Zustand zeigt — ein halb verdecktes Fenster ist
+    // sonst "unsichtbar", obwohl es real auf dem Schirm steht. Kacheln
+    // gleicher Fenster gleiten animiert an ihre neue Position.
+    func setAssigned(_ wins: [WinInfo], split: Int, cross: Int, ghosts: [WinInfo] = []) {
         var oldFrames: [CGWindowID: NSRect] = [:]
         for t in tiles { oldFrames[t.info.windowID] = t.frame }
         tiles.forEach { $0.removeFromSuperview() }
         tiles = []
-        emptyHint.isHidden = !wins.isEmpty || bounds.height < 60
+        ghostTiles.forEach { $0.removeFromSuperview() }
+        ghostTiles = []
+        emptyHint.isHidden = !(wins.isEmpty && ghosts.isEmpty) || bounds.height < 60
         ratioPillBG.isHidden = true
         crossPillBG.isHidden = true
         mainHandle.isHidden = true
         crossHandle.isHidden = true
+
+        // Geister zuerst einfügen (landen visuell hinter den Raster-Kacheln);
+        // voll interaktiv — Klick fokussiert, Drag ordnet zu.
+        for w in ghosts {
+            let t = WindowTileView(info: w, isVisible: false, controller: controller!,
+                                   frame: scaledRect(w), isGhost: true)
+            addSubview(t, positioned: .below, relativeTo: badge)
+            ghostTiles.append(t)
+        }
+
         guard !wins.isEmpty else { return }
 
-        let full = display.full
-        let rects: [NSRect] = wins.map { w in
-            NSRect(x: (w.bounds.minX - full.minX) / full.width * bounds.width,
-                   y: (w.bounds.minY - full.minY) / full.height * bounds.height,
-                   width: w.bounds.width / full.width * bounds.width,
-                   height: w.bounds.height / full.height * bounds.height)
-        }
+        let rects: [NSRect] = wins.map(scaledRect)
 
         // Rückwärts einfügen, damit Slot 0 (typischerweise das Hauptfenster)
         // bei Überlappungen visuell obenauf liegt.
