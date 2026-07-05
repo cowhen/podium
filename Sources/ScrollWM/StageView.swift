@@ -89,7 +89,8 @@ final class StageView: NSView {
 
     // Gruppiert nach App (Reihenfolge des ersten Auftretens = Z-Order), Flow-
     // Layout mit Umbruch bei maxWidth. filter matcht App-Name oder Titel.
-    func setWindows(_ wins: [WinInfo], filter: String, maxWidth: CGFloat, dot: (WinInfo) -> NSColor?) {
+    func setWindows(_ wins: [WinInfo], filter: String, maxWidth: CGFloat,
+                    dot: (WinInfo) -> NSColor?, floating: (WinInfo) -> Bool = { _ in false }) {
         tiles.forEach { $0.removeFromSuperview() }
         headers.forEach { $0.removeFromSuperview() }
         tiles = []; headers = []
@@ -124,7 +125,8 @@ final class StageView: NSView {
             for w in group {
                 if tx > x, tx + tw > maxWidth { tx = x; ty += th + hgap }   // Umbruch innerhalb großer Gruppen
                 let t = WindowTileView(info: w, isVisible: false, controller: controller!,
-                                       frame: NSRect(x: tx, y: ty, width: tw, height: th), dot: dot(w))
+                                       frame: NSRect(x: tx, y: ty, width: tw, height: th),
+                                       dot: dot(w), floating: floating(w))
                 addSubview(t)
                 tiles.append(t)
                 tx += tw + hgap

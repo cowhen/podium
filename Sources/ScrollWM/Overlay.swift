@@ -143,7 +143,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let cmd = event.modifierFlags.contains(.command)
 
         switch event.keyCode {
-        case 36, 76: enterPressed(); return true
+        case 36, 76: enterPressed(cmd: cmd); return true
         case 53: escPressed(); return true
         case 49: spacePressed(); return true
         case 123: arrow(.left, shift: shift); return true
@@ -196,7 +196,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
         return out
     }
 
-    private func enterPressed() {
+    // Enter ist nach Region entschärft: Auf einer BÜHNEN-Kachel fokussiert es
+    // (Switcher-Kern), auf einer BOX-Kachel schließt es nur das Overlay und
+    // behält alles — vorher hat Enter dort das gewählte Fenster fokussiert
+    // und damit den "Bestätigen"-Reflex bestraft. ⌘↵ fokussiert immer.
+    private func enterPressed(cmd: Bool) {
         if grabbed {
             grabbed = false
             // Serien-Flow: Filter bleibt, Ring springt zum nächsten Treffer.
@@ -205,12 +209,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             updateSelectionUI()
             updateFooter()
-        } else if let w = selectedInfo() {
-            axFocus(w.ax)
-            close()
-        } else {
-            close()
+            return
         }
+        let w = selectedInfo()
+        let onStage = w.map { win in stage.contains { $0.windowID == win.windowID } } ?? false
+        if let w, cmd || onStage {
+            axFocus(w.ax)
+        }
+        close()
     }
 
     private func escPressed() {
@@ -490,10 +496,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Bühne erst am 75%-Maximum layouten und messen, dann die Breite auf
         // den tatsächlichen Bedarf trimmen und ggf. enger neu umbrechen.
         let stageV = StageView(controller: self)
-        stageV.setWindows(stage, filter: search, maxWidth: availW, dot: dotColor)
+        stageV.setWindows(stage, filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin)
         innerWidth = min(availW, max(mapWidth, stageV.frame.width, 420))
         if innerWidth < availW {
-            stageV.setWindows(stage, filter: search, maxWidth: innerWidth, dot: dotColor)
+            stageV.setWindows(stage, filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin)
         }
         stageMaxWidth = innerWidth
         stageView = stageV
@@ -614,6 +620,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func dotColor(_ w: WinInfo) -> NSColor? {
         guard let id = displayID(containing: CGPoint(x: w.bounds.midX, y: w.bounds.midY), in: displays) else { return nil }
         return displayColors[id]
+    }
+
+    private func isFloatingWin(_ w: WinInfo) -> Bool {
+        cfg.isFloating(pid: w.pid, name: w.app)
     }
 
     // MARK: Treffer-Ermittlung
@@ -960,7 +970,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if !search.isEmpty {
             list += displays.flatMap { assigned[$0.id] ?? [] }.filter(matchesSearch)
         }
-        stageV.setWindows(list, filter: search, maxWidth: stageMaxWidth, dot: dotColor)
+        stageV.setWindows(list, filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
         resizeToFitStage()
         updateSelectionUI()
@@ -976,7 +986,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let topY = f.maxY
         f.size.height = newH
         f.origin.y = topY - newH
-        win.setFrame(f, display: true)
+        win.setFrame(f, display: true, animate: true)
         win.invalidateShadow()
     }
 

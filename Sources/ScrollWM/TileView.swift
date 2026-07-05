@@ -17,7 +17,7 @@ final class WindowTileView: NSView {
     private var ghost: NSImageView?
 
     init(info: WinInfo, isVisible: Bool, controller: OverlayController, frame: NSRect,
-         accent: NSColor = .controlAccentColor, dot: NSColor? = nil) {
+         accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false) {
         self.info = info
         self.isVisible = isVisible
         self.accent = accent
@@ -61,6 +61,18 @@ final class WindowTileView: NSView {
             d.layer?.backgroundColor = dot.cgColor
             d.layer?.cornerRadius = 4
             addSubview(d)
+        }
+
+        if floating {
+            // Floatende Apps verhalten sich fundamental anders (kein Kacheln,
+            // kein Greifen) — das muss man der Kachel ansehen.
+            let pin = NSImageView(frame: NSRect(x: bounds.width - 42, y: bounds.height - 21, width: 15, height: 15))
+            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            pin.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Floatend")?
+                .withSymbolConfiguration(cfg)
+            pin.contentTintColor = NSColor.white.withAlphaComponent(0.55)
+            pin.toolTip = "Floatend — wird beim Ablegen nur zentriert, nie gekachelt"
+            addSubview(pin)
         }
 
         // Schließen-Knopf oben rechts — schließt das ECHTE Fenster.
