@@ -25,11 +25,11 @@ final class RestoreCenter {
     // Aktuellen Ist-Zustand als Soll-Anordnung übernehmen.
     func bless(_ wins: [WinInfo]) {
         blessed = wins.compactMap { w in axFrame(w.ax).map { (w.ax, $0) } }
-        fingerprint = Self.currentFingerprint()
+        fingerprint = displaySetFingerprint()
     }
 
     func restoreNow() {
-        guard !blessed.isEmpty, Self.currentFingerprint() == fingerprint else { return }
+        guard !blessed.isEmpty, displaySetFingerprint() == fingerprint else { return }
         for (ax, frame) in blessed { axSetFrame(ax, frame) }
     }
 
@@ -43,12 +43,4 @@ final class RestoreCenter {
         }
     }
 
-    // Nur wiederherstellen, wenn dieselbe Monitor-Konstellation aktiv ist wie
-    // beim Merken (Display-IDs sind über Reconnects nicht stabil, Namen+Auflösung schon).
-    private static func currentFingerprint() -> String {
-        NSScreen.screens
-            .map { "\($0.localizedName):\(Int($0.frame.width))x\(Int($0.frame.height))" }
-            .sorted()
-            .joined(separator: "|")
-    }
 }

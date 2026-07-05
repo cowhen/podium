@@ -51,6 +51,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
     private var displays: [Display] = []
     private var displayColors: [CGDirectDisplayID: NSColor] = [:]
+    // Tab-Stapel pro Monitor: ein Slot des Rasters hält mehrere Fenster
+    // übereinander, eine Tab-Leiste (TabBars) schaltet um. Überlebt bewusst
+    // das Schließen des Overlays.
+    struct TabStack { var slot: Int; var extras: [WinInfo] }
+    private var stacks: [CGDirectDisplayID: TabStack] = [:]
     private var allWins: [WinInfo] = []
     private var cfg = AppConfig()
     private var snapshot: [(ax: AXUIElement, frame: CGRect)] = [] // Zustand beim Öffnen, für Escape
@@ -115,11 +120,31 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         stage = restAll.sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
 
+        // Bestehende Tab-Stapel revalidieren: Extras mit frischen WinInfos
+        // versehen und von der Bühne nehmen; verwaiste Stapel auflösen.
+        for (id, st) in stacks {
+            let fresh = st.extras.compactMap { old in allWins.first { $0.windowID == old.windowID } }
+            if fresh.isEmpty {
+                stacks[id] = nil
+                TabBars.shared.remove(id)
+                continue
+            }
+            stacks[id]?.extras = fresh
+            stage.removeAll { w in fresh.contains { $0.windowID == w.windowID } }
+        }
+
         buildWindow()
     }
 
     // Schließen und alle Änderungen behalten; Anordnung für Wake-Restore merken.
     func close() {
+        // Option: Hintergrund-Fenster (Bühne, nicht floatend) beim Schließen
+        // minimieren — die Karte zeigt dann nur noch, was wirklich sichtbar ist.
+        if SettingsStore.shared.autoMinimize {
+            for w in stage where !isFloatingWin(w) {
+                axSetMinimized(w.ax, true)
+            }
+        }
         RestoreCenter.shared.bless(allWins)
         teardown()
     }
@@ -758,11 +783,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // ersetzen; innerhalb derselben Box: Plätze tauschen). Drop außerhalb der
     // Boxen = aus der Box zurück auf die Bühne. Wirkt sofort auf die echten
     // Fenster.
-    func dragEnded(_ info: WinInfo, at p: NSPoint) {
+    func dragEnded(_ info: WinInfo, at p: NSPoint, option: Bool = false) {
         clearHover()
         dragging = false
         if let id = nearestBoxID(at: p) {
-            dropOnBox(info, onto: id, at: p)
+            dropOnBox(info, onto: id, at: p, option: option)
         } else if boxOwner(of: info) != nil {
             demote(info)
         }
@@ -793,12 +818,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
         take.forEach { pulseTile($0, in: id) }
     }
 
-    private func dropOnBox(_ info: WinInfo, onto id: CGDirectDisplayID, at p: NSPoint) {
+    private func dropOnBox(_ info: WinInfo, onto id: CGDirectDisplayID, at p: NSPoint, option: Bool = false) {
         guard !cfg.isFloating(pid: info.pid, name: info.app) else {
             floatPlace(info, onto: id)
             return
         }
         let hitIdx = mapBoxes[id]?.dropSlot(atWindowPoint: p)
+
+        // ⌥-Drop auf eine Kachel: Fenster in deren Slot STAPELN (Tabs)
+        // statt das Raster wachsen zu lassen.
+        if option, let slot = hitIdx {
+            stackAdd(info, onto: id, slot: slot)
+            return
+        }
 
         if let from = assigned[id]?.firstIndex(where: { $0.windowID == info.windowID }) {
             // Innerhalb derselben Box: Plätze tauschen.
@@ -888,6 +920,101 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
+    // MARK: Tab-Stapel
+
+    // Fenster in den Stapel eines Slots legen (⌥-Drop). Der Slot behält sein
+    // Raster-Fenster; alle Stapel-Mitglieder teilen sich dessen Fläche unter
+    // einer Tab-Leiste.
+    private func stackAdd(_ info: WinInfo, onto id: CGDirectDisplayID, slot: Int) {
+        removeEverywhere(info)
+        var st = stacks[id] ?? TabStack(slot: slot, extras: [])
+        st.slot = slot
+        st.extras.removeAll { $0.windowID == info.windowID }
+        st.extras.append(info)
+        stacks[id] = st
+        retile(id)
+        refreshStage()
+        if let t = mapBoxes[id]?.tiles.indices.contains(slot) == true ? mapBoxes[id]?.tiles[slot] : nil { t.pulse() }
+    }
+
+    // Ganzer Monitor als Tab-Stapel: ein Fenster füllt die Fläche, alle
+    // anderen stapeln sich dahinter, die Leiste schaltet um.
+    func enableTabMode(_ id: CGDirectDisplayID) {
+        let arr = assigned[id] ?? []
+        let ghosts = ghostWins(for: id).filter { !isFloatingWin($0) }
+        guard let first = arr.first ?? ghosts.first else { return }
+        var extras = Array(arr.dropFirst()) + (stacks[id]?.extras ?? [])
+        extras += ghosts.filter { g in g.windowID != first.windowID && !extras.contains { $0.windowID == g.windowID } }
+        stage.removeAll { w in extras.contains { $0.windowID == w.windowID } || w.windowID == first.windowID }
+        assigned[id] = [first]
+        splitMode[id] = 0
+        crossMode[id] = 0
+        stacks[id] = TabStack(slot: 0, extras: extras)
+        retile(id)
+        refreshStage()
+    }
+
+    // Stapel auflösen: Extras zurück auf die Bühne, Leiste weg.
+    func disableTabMode(_ id: CGDirectDisplayID) {
+        guard let st = stacks[id] else { return }
+        stacks[id] = nil
+        TabBars.shared.remove(id)
+        stage.append(contentsOf: st.extras)
+        retile(id)
+        refreshStage()
+    }
+
+    // Rechtsklick auf eine Monitor-Box: Modus wählen.
+    func showModeMenu(for id: CGDirectDisplayID, event: NSEvent, in view: NSView) {
+        let menu = NSMenu()
+        let tabbed = stacks[id] != nil
+        let t = NSMenuItem(title: "Tab-Modus (alle Fenster stapeln)", action: #selector(menuEnableTabs(_:)), keyEquivalent: "")
+        t.target = self
+        t.representedObject = NSNumber(value: id)
+        t.state = tabbed ? .on : .off
+        menu.addItem(t)
+        let sp = NSMenuItem(title: "Split-Modus (Stapel auflösen)", action: #selector(menuDisableTabs(_:)), keyEquivalent: "")
+        sp.target = self
+        sp.representedObject = NSNumber(value: id)
+        sp.state = tabbed ? .off : .on
+        menu.addItem(sp)
+        NSMenu.popUpContextMenu(menu, with: event, for: view)
+    }
+
+    @objc private func menuEnableTabs(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? NSNumber else { return }
+        enableTabMode(CGDirectDisplayID(n.uint32Value))
+    }
+
+    @objc private func menuDisableTabs(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? NSNumber else { return }
+        disableTabMode(CGDirectDisplayID(n.uint32Value))
+    }
+
+    // Stapel auf die echten Fenster anwenden: alle Mitglieder bekommen die
+    // Slot-Fläche unterhalb der Tab-Leiste; verwaiste Stapel lösen sich auf.
+    private func applyStack(_ id: CGDirectDisplayID) {
+        guard var st = stacks[id] else { return }
+        st.extras.removeAll { axFrame($0.ax) == nil }   // tote Fenster raus
+        let arr = assigned[id] ?? []
+        guard !arr.isEmpty, !st.extras.isEmpty else {
+            if !st.extras.isEmpty { stage.append(contentsOf: st.extras) }
+            stacks[id] = nil
+            TabBars.shared.remove(id)
+            return
+        }
+        st.slot = min(st.slot, arr.count - 1)
+        stacks[id] = st
+        let base = arr[st.slot].bounds
+        let content = CGRect(x: base.minX, y: base.minY + TabBars.barHeight,
+                             width: base.width, height: base.height - TabBars.barHeight)
+        LinkedEdges.shared.suppress()
+        axSetFrame(arr[st.slot].ax, content)
+        for w in st.extras { axSetFrame(w.ax, content) }
+        TabBars.shared.update(displayID: id, slotQuartzRect: base,
+                              wins: [arr[st.slot]] + st.extras, active: arr[st.slot].windowID)
+    }
+
     // MARK: Anwenden
 
     // Wendet den aktuellen Box-Inhalt eines Monitors sofort auf die echten
@@ -896,6 +1023,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard let d = displays.first(where: { $0.id == id }) else { return }
         let wins = assigned[id] ?? []
         if !wins.isEmpty {
+            LinkedEdges.shared.suppress()
             appWM.tileGroup(wins.map { $0.ax }, on: d, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
             let fresh = wins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
             // Thumbnails umgroßter Fenster sofort verwerfen — schnelle Apps
@@ -905,7 +1033,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 ThumbnailCache.shared.remove(f.windowID)
             }
             assigned[id] = fresh
+            // Verbundene Ränder: Gruppe für Live-Folgen registrieren.
+            LinkedEdges.shared.track(displayID: id, display: d, wins: wins.map { $0.ax },
+                                     mainR: Layout.ratio(splitMode[id] ?? 0),
+                                     crossR: Layout.ratio(crossMode[id] ?? 0))
         }
+        applyStack(id)
         mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0, ghosts: ghostWins(for: id))
         updateSelectionUI()
         // Manche Apps (v.a. Electron wie Teams) wenden das Setzen verzögert

@@ -103,11 +103,13 @@ final class WindowManager {
 
     // Sofort-Kacheln von bis zu 4 Fenstern eines einzelnen Monitors — für
     // Klick/Drag auf eine Monitor-Box im Overlay.
-    func tileGroup(_ wins: [AXUIElement], on display: Display, split: Int, cross: Int = 0) {
+    func tileGroup(_ wins: [AXUIElement], on display: Display, split: Int, cross: Int = 0,
+                   mainR: CGFloat? = nil, crossR: CGFloat? = nil) {
         guard !wins.isEmpty else { return }
         let shown = Array(wins.prefix(Tuning.maxAssigned))
         let frames = Layout.frames(visible: display.visible, vertical: display.vertical,
-                                   count: shown.count, split: split, cross: cross)
+                                   count: shown.count, split: split, cross: cross,
+                                   mainR: mainR, crossR: crossR)
         tileShown(shown, frames: frames, vertical: display.vertical)
     }
 

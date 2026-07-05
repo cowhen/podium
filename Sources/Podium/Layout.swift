@@ -29,13 +29,16 @@ enum Layout {
 
     // split = Hauptachse (Spalte/Reihe von Slot 0 bzw. linke Spalte im 2x2),
     // cross = Querachse innerhalb der kleinen Gruppe (Stapel im 3er, Reihen im 2x2).
-    static func frames(visible area: CGRect, vertical: Bool, count: Int, split: Int, cross: Int = 0) -> [CGRect] {
+    // mainR/crossR überschreiben die Rast-Stufen mit kontinuierlichen Werten —
+    // für verbundene Ränder (echtes Fenster-Resize zieht Nachbarn frei mit).
+    static func frames(visible area: CGRect, vertical: Bool, count: Int, split: Int, cross: Int = 0,
+                       mainR: CGFloat? = nil, crossR: CGFloat? = nil) -> [CGRect] {
         let inner = area.insetBy(dx: gap, dy: gap)
         switch count {
         case ..<2:
             return [inner]
         case 2:
-            let r = ratio(split)
+            let r = mainR ?? ratio(split)
             if vertical {
                 let total = inner.height - gap
                 let h0 = (total * r).rounded()
@@ -55,10 +58,11 @@ enum Layout {
             // Quer: 1 spannt die ganze linke Spalte (Breite = ratio), 2/3
             // rechts gestapelt. Hochkant (vertical): gedreht — 1 spannt die
             // ganze obere Reihe (Höhe = ratio), 2/3 darunter nebeneinander.
-            let r = ratio(split)
+            let r = mainR ?? ratio(split)
+            let rc = crossR ?? ratio(cross)
             if vertical {
                 let rowH = ((inner.height - gap) * r).rounded(), rowH2 = inner.height - gap - rowH
-                let colW = ((inner.width - gap) * ratio(cross)).rounded(), colW2 = inner.width - gap - colW
+                let colW = ((inner.width - gap) * rc).rounded(), colW2 = inner.width - gap - colW
                 let rightX = inner.minX + colW + gap
                 let bottomY = inner.minY + rowH + gap
                 return [
@@ -68,7 +72,7 @@ enum Layout {
                 ]
             } else {
                 let colW = ((inner.width - gap) * r).rounded(), colW2 = inner.width - gap - colW
-                let rowH = ((inner.height - gap) * ratio(cross)).rounded(), rowH2 = inner.height - gap - rowH
+                let rowH = ((inner.height - gap) * rc).rounded(), rowH2 = inner.height - gap - rowH
                 let rightX = inner.minX + colW + gap
                 let bottomY = inner.minY + rowH + gap
                 return [
@@ -80,8 +84,8 @@ enum Layout {
         default:
             // 2x2-Raster: 1 oben links, 2 oben rechts, 3 unten links, 4 unten
             // rechts. split steuert die Spaltenbreite, cross die Reihenhöhe.
-            let colW = ((inner.width - gap) * ratio(split)).rounded(), colW2 = inner.width - gap - colW
-            let rowH = ((inner.height - gap) * ratio(cross)).rounded(), rowH2 = inner.height - gap - rowH
+            let colW = ((inner.width - gap) * (mainR ?? ratio(split))).rounded(), colW2 = inner.width - gap - colW
+            let rowH = ((inner.height - gap) * (crossR ?? ratio(cross))).rounded(), rowH2 = inner.height - gap - rowH
             let rightX = inner.minX + colW + gap
             let bottomY = inner.minY + rowH + gap
             return [

@@ -213,6 +213,6 @@ final class WindowTileView: NSView {
     override func mouseUp(with event: NSEvent) {
         defer { dragStart = nil; ghost?.removeFromSuperview(); ghost = nil }
         guard ghost != nil else { controller?.tileClicked(info); return }   // reiner Klick, kein Drag
-        controller?.dragEnded(info, at: event.locationInWindow)
+        controller?.dragEnded(info, at: event.locationInWindow, option: event.modifierFlags.contains(.option))
     }
 }

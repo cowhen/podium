@@ -27,11 +27,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func start() {
         applyHotkey()
+        applyRadial()
         DirectActions.register()
         RestoreCenter.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: SettingsStore.changed, object: nil)
+        // Setup-Wechsel (Umstecken, Wake): passendes Layout ggf. automatisch anwenden.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { _ in
+            LayoutPresetStore.shared.screenSetupChanged()
+        }
         Onboarding.showIfNeeded()
+    }
+
+    // Radial-Menü-Hotkey (⌃⌥Space) je nach Einstellung an/ab.
+    private func applyRadial() {
+        if SettingsStore.shared.radialMenu {
+            HotKeyCenter.shared.register(id: 30, keyCode: UInt32(kVK_Space),
+                                         mods: UInt32(controlKey | optionKey)) {
+                RadialMenu.shared.toggle()
+            }
+        } else {
+            HotKeyCenter.shared.unregister(id: 30)
+        }
     }
 
     // Kurzbefehl aus den Einstellungen (neu) registrieren; Menü-Titel spiegeln.
@@ -44,7 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatus(trusted: true, hotkeyOK: ok)
     }
 
-    @objc private func settingsChanged() { applyHotkey() }
+    @objc private func settingsChanged() {
+        applyHotkey()
+        applyRadial()
+        if !SettingsStore.shared.linkedEdges { LinkedEdges.shared.untrackAll() }
+    }
 
     // MARK: Menüleiste
 
@@ -69,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   action: #selector(relayoutNow), keyEquivalent: "r")
         menu.addItem(switcherItem)
         menu.addItem(NSMenuItem(title: "Anordnung wiederherstellen", action: #selector(restoreNow), keyEquivalent: ""))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Layout für dieses Setup speichern", action: #selector(saveLayout), keyEquivalent: "s"))
+        menu.addItem(NSMenuItem(title: "Gespeichertes Layout anwenden", action: #selector(applyLayout), keyEquivalent: "l"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Einstellungen…", action: #selector(openSettings), keyEquivalent: ","))
         loginItem = NSMenuItem(title: "Bei Anmeldung starten", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -98,6 +123,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func relayoutNow() { OverlayController.shared.toggle() }
     @objc private func restoreNow() { RestoreCenter.shared.restoreNow() }
+    @objc private func saveLayout() { LayoutPresetStore.shared.saveCurrent() }
+    @objc private func applyLayout() {
+        guard let p = LayoutPresetStore.shared.preset(for: displaySetFingerprint()) else { return }
+        LayoutPresetStore.shared.apply(p)
+    }
     @objc private func openSettings() {
         if settingsWC == nil { settingsWC = SettingsWindowController() }
         settingsWC?.showWindow(nil)

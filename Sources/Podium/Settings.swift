@@ -41,6 +41,39 @@ final class SettingsStore {
         NotificationCenter.default.post(name: Self.changed, object: nil)
     }
 
+    // MARK: Feature-Schalter
+
+    // Bool-Optionen mit explizitem Default (UserDefaults.bool wäre immer false).
+    private func flag(_ key: String, default def: Bool) -> Bool {
+        d.object(forKey: key) as? Bool ?? def
+    }
+
+    private func setFlag(_ key: String, _ v: Bool) {
+        d.set(v, forKey: key)
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+    }
+
+    // Hintergrund-Fenster beim Schließen des Overlays minimieren.
+    var autoMinimize: Bool {
+        get { flag("autoMinimize", default: false) }
+        set { setFlag("autoMinimize", newValue) }
+    }
+    // Radial-Menü (⌃⌥Space) für Schnell-Snapping.
+    var radialMenu: Bool {
+        get { flag("radialMenu", default: true) }
+        set { setFlag("radialMenu", newValue) }
+    }
+    // Verbundene Ränder: echtes Fenster-Resize zieht die Raster-Nachbarn mit.
+    var linkedEdges: Bool {
+        get { flag("linkedEdges", default: true) }
+        set { setFlag("linkedEdges", newValue) }
+    }
+    // Gespeichertes Layout beim Erkennen des Monitor-Setups automatisch anwenden.
+    var autoApplyLayouts: Bool {
+        get { flag("autoApplyLayouts", default: false) }
+        set { setFlag("autoApplyLayouts", newValue) }
+    }
+
     // MARK: Monitor-Farben
 
     var monitorColors: [NSColor] {
@@ -169,36 +202,154 @@ final class AppListEditor: NSScrollView, NSTextViewDelegate {
     }
 }
 
-// Einstellungsfenster: Kurzbefehl, Monitor-Farben, App-Listen, Tastatur-Referenz.
+// Einstellungsfenster im System-Settings-Stil: Seitenleiste links, Bereiche
+// rechts — Allgemein (Kurzbefehl + Feature-Schalter), Darstellung (Farben),
+// Apps (Ignore/Floating), Tastatur (Referenz), Layouts (gespeicherte Setups).
 final class SettingsWindowController: NSWindowController {
     private var cfg = AppConfig.load()
+    private let contentContainer = NSView()
+    private var sidebarButtons: [NSButton] = []
+    private var layoutsList: NSStackView?
 
     convenience init() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 520),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "PODIUM Einstellungen"
         win.isReleasedWhenClosed = false
         self.init(window: win)
 
-        let content = NSStackView()
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 14
-        content.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        let sidebar = NSStackView()
+        sidebar.orientation = .vertical
+        sidebar.alignment = .leading
+        sidebar.spacing = 2
+        sidebar.edgeInsets = NSEdgeInsets(top: 14, left: 10, bottom: 14, right: 10)
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
 
-        // Kurzbefehl
-        let hotkeyRow = NSStackView(views: [label("Overlay ein-/ausblenden:"), ShortcutRecorderButton()])
-        hotkeyRow.spacing = 10
-        content.addArrangedSubview(hotkeyRow)
+        let sections = ["Allgemein", "Darstellung", "Apps", "Tastatur", "Layouts"]
+        for (i, name) in sections.enumerated() {
+            let b = NSButton(title: name, target: self, action: #selector(sidebarClicked(_:)))
+            b.tag = i
+            b.isBordered = false
+            b.alignment = .left
+            b.font = .systemFont(ofSize: 13)
+            b.contentTintColor = .labelColor
+            b.wantsLayer = true
+            b.layer?.cornerRadius = 6
+            b.translatesAutoresizingMaskIntoConstraints = false
+            b.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            sidebar.addArrangedSubview(b)
+            sidebarButtons.append(b)
+        }
 
-        content.addArrangedSubview(separator())
+        let sidebarWrap = NSView()
+        sidebarWrap.wantsLayer = true
+        sidebarWrap.layer?.backgroundColor = NSColor.windowBackgroundColor.blended(withFraction: 0.06, of: .black)?.cgColor
+        sidebarWrap.translatesAutoresizingMaskIntoConstraints = false
+        sidebarWrap.addSubview(sidebar)
+        contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = sectionHeader("Monitor-Farben")
-        content.addArrangedSubview(header)
+        let root = NSView()
+        root.addSubview(sidebarWrap)
+        root.addSubview(contentContainer)
+        NSLayoutConstraint.activate([
+            sidebarWrap.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebarWrap.topAnchor.constraint(equalTo: root.topAnchor),
+            sidebarWrap.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebarWrap.widthAnchor.constraint(equalToConstant: 170),
+            sidebar.leadingAnchor.constraint(equalTo: sidebarWrap.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: sidebarWrap.topAnchor),
+            contentContainer.leadingAnchor.constraint(equalTo: sidebarWrap.trailingAnchor),
+            contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentContainer.topAnchor.constraint(equalTo: root.topAnchor),
+            contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        win.contentView = root
+        win.center()
 
-        let hint = hintLabel("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts).")
-        content.addArrangedSubview(hint)
+        NotificationCenter.default.addObserver(self, selector: #selector(layoutsChanged),
+                                               name: LayoutPresetStore.changed, object: nil)
+        selectPane(0)
+    }
 
+    @objc private func sidebarClicked(_ sender: NSButton) { selectPane(sender.tag) }
+
+    private func selectPane(_ index: Int) {
+        for (i, b) in sidebarButtons.enumerated() {
+            b.layer?.backgroundColor = i == index
+                ? NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
+                : NSColor.clear.cgColor
+            b.contentTintColor = i == index ? .white : .labelColor
+        }
+        contentContainer.subviews.forEach { $0.removeFromSuperview() }
+        let pane: NSView
+        switch index {
+        case 0: pane = paneAllgemein()
+        case 1: pane = paneDarstellung()
+        case 2: pane = paneApps()
+        case 3: pane = paneTastatur()
+        default: pane = paneLayouts()
+        }
+        pane.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(pane)
+        NSLayoutConstraint.activate([
+            pane.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            pane.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            pane.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+        ])
+    }
+
+    private func stack() -> NSStackView {
+        let st = NSStackView()
+        st.orientation = .vertical
+        st.alignment = .leading
+        st.spacing = 12
+        st.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        return st
+    }
+
+    private func toggleRow(_ title: String, _ hint: String, isOn: Bool, action: Selector) -> NSView {
+        let box = NSStackView()
+        box.orientation = .vertical
+        box.alignment = .leading
+        box.spacing = 2
+        let cb = NSButton(checkboxWithTitle: title, target: self, action: action)
+        cb.state = isOn ? .on : .off
+        box.addArrangedSubview(cb)
+        let h = hintLabel(hint)
+        box.addArrangedSubview(h)
+        return box
+    }
+
+    // MARK: Bereiche
+
+    private func paneAllgemein() -> NSView {
+        let st = stack()
+        st.addArrangedSubview(sectionHeader("Kurzbefehl"))
+        let row = NSStackView(views: [label("Overlay ein-/ausblenden:"), ShortcutRecorderButton()])
+        row.spacing = 10
+        st.addArrangedSubview(row)
+        st.addArrangedSubview(separator())
+        st.addArrangedSubview(sectionHeader("Verhalten"))
+        st.addArrangedSubview(toggleRow("Hintergrund-Fenster beim Schließen minimieren",
+            "Bühnen-Fenster wandern ins Dock, wenn das Overlay zugeht (floatende ausgenommen).",
+            isOn: SettingsStore.shared.autoMinimize, action: #selector(toggleAutoMinimize(_:))))
+        st.addArrangedSubview(toggleRow("Radial-Menü (⌃⌥Space)",
+            "Kreis-Menü am Mauszeiger für Hälften, Viertel und Maximieren.",
+            isOn: SettingsStore.shared.radialMenu, action: #selector(toggleRadial(_:))))
+        st.addArrangedSubview(toggleRow("Verbundene Ränder",
+            "Zieht man am echten Rand eines gekachelten Fensters, folgen die Nachbarn.",
+            isOn: SettingsStore.shared.linkedEdges, action: #selector(toggleLinked(_:))))
+        st.addArrangedSubview(toggleRow("Layouts automatisch anwenden",
+            "Beim Erkennen eines gespeicherten Monitor-Setups das Layout wiederherstellen.",
+            isOn: SettingsStore.shared.autoApplyLayouts, action: #selector(toggleAutoApply(_:))))
+        return st
+    }
+
+    private func paneDarstellung() -> NSView {
+        let st = stack()
+        st.addArrangedSubview(sectionHeader("Monitor-Farben"))
+        st.addArrangedSubview(hintLabel("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts)."))
         let colors = SettingsStore.shared.monitorColors
         for i in 0..<4 {
             let well = NSColorWell()
@@ -211,53 +362,107 @@ final class SettingsWindowController: NSWindowController {
             well.heightAnchor.constraint(equalToConstant: 24).isActive = true
             let row = NSStackView(views: [label("Monitor \(i + 1):"), well])
             row.spacing = 10
-            content.addArrangedSubview(row)
+            st.addArrangedSubview(row)
         }
+        st.addArrangedSubview(NSButton(title: "Standardfarben", target: self, action: #selector(resetColors(_:))))
+        return st
+    }
 
-        let reset = NSButton(title: "Standardfarben", target: self, action: #selector(resetColors(_:)))
-        content.addArrangedSubview(reset)
-
-        content.addArrangedSubview(separator())
-
-        // App-Listen: ignorierte Apps tauchen im Overlay gar nicht auf,
-        // floatende bleiben sichtbar, nehmen aber nie am Kacheln teil.
-        content.addArrangedSubview(sectionHeader("Ausgeschlossene Apps"))
-        content.addArrangedSubview(hintLabel("Ignoriert — erscheinen gar nicht im Overlay (ein App-Name pro Zeile)."))
-        let ignoreEditor = AppListEditor(lines: cfg.ignoreNames, height: 60)
+    private func paneApps() -> NSView {
+        let st = stack()
+        st.addArrangedSubview(sectionHeader("Ignorierte Apps"))
+        st.addArrangedSubview(hintLabel("Erscheinen gar nicht im Overlay (ein App-Name pro Zeile)."))
+        let ignoreEditor = AppListEditor(lines: cfg.ignoreNames, height: 80)
         ignoreEditor.onChange = { [weak self] names in
             self?.cfg.ignoreNames = names
             self?.cfg.save()
         }
-        content.addArrangedSubview(ignoreEditor)
-
-        content.addArrangedSubview(hintLabel("Floatend — bleiben sichtbar, werden nie gekachelt (z. B. Finder).") )
-        let floatEditor = AppListEditor(lines: cfg.floatingNames, height: 60)
+        st.addArrangedSubview(ignoreEditor)
+        st.addArrangedSubview(sectionHeader("Floatende Apps"))
+        st.addArrangedSubview(hintLabel("Bleiben sichtbar, werden aber nie gekachelt — Ablegen zentriert nur (z. B. Finder)."))
+        let floatEditor = AppListEditor(lines: cfg.floatingNames, height: 80)
         floatEditor.onChange = { [weak self] names in
             self?.cfg.floatingNames = names
             self?.cfg.save()
         }
-        content.addArrangedSubview(floatEditor)
-        let floatHint = hintLabel("Finder und Systemeinstellungen sind zusätzlich fest per Bundle-ID hinterlegt.")
-        content.addArrangedSubview(floatHint)
+        st.addArrangedSubview(floatEditor)
+        st.addArrangedSubview(hintLabel("Finder und Systemeinstellungen sind zusätzlich fest per Bundle-ID hinterlegt."))
+        return st
+    }
 
-        content.addArrangedSubview(separator())
-
-        // Tastatur-Referenz: dieselbe Quelle wie das "?"-Cheatsheet im Overlay.
-        content.addArrangedSubview(sectionHeader("Tastatur-Kürzel im Overlay"))
+    private func paneTastatur() -> NSView {
+        let st = stack()
+        st.spacing = 4
         for line in KeyboardHelp.lines + KeyboardHelp.globalLines where !line.text.isEmpty {
             let l = NSTextField(labelWithString: line.text)
             l.font = line.isHeader ? .systemFont(ofSize: 12, weight: .bold)
                                    : .monospacedSystemFont(ofSize: 11, weight: .regular)
             l.textColor = line.isHeader ? .secondaryLabelColor : .labelColor
             l.lineBreakMode = .byWordWrapping
-            l.preferredMaxLayoutWidth = 360
-            content.addArrangedSubview(l)
+            l.preferredMaxLayoutWidth = 470
+            st.addArrangedSubview(l)
         }
-
-        win.contentView = content
-        win.setContentSize(content.fittingSize)
-        win.center()
+        return st
     }
+
+    private func paneLayouts() -> NSView {
+        let st = stack()
+        st.addArrangedSubview(sectionHeader("Gespeicherte Layouts"))
+        st.addArrangedSubview(hintLabel("Pro Monitor-Setup ein Layout — PODIUM erkennt das aktive Setup am Fingerabdruck aus Monitornamen und Auflösungen."))
+        let list = NSStackView()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 8
+        layoutsList = list
+        st.addArrangedSubview(list)
+        rebuildLayoutsList()
+        let save = NSButton(title: "＋ Aktuelles Layout speichern", target: self, action: #selector(saveLayoutClicked(_:)))
+        st.addArrangedSubview(save)
+        return st
+    }
+
+    private func rebuildLayoutsList() {
+        guard let list = layoutsList else { return }
+        list.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let active = displaySetFingerprint()
+        let presets = LayoutPresetStore.shared.presets
+        if presets.isEmpty {
+            list.addArrangedSubview(hintLabel("Noch keine Layouts gespeichert."))
+            return
+        }
+        for p in presets {
+            let isActive = p.fingerprint == active
+            let name = label("\(p.name) · \(p.entries.count) Fenster" + (isActive ? "  ●" : ""))
+            if isActive { name.textColor = .systemGreen }
+            let apply = NSButton(title: "Anwenden", target: self, action: #selector(applyLayoutClicked(_:)))
+            apply.identifier = NSUserInterfaceItemIdentifier(p.fingerprint)
+            apply.isEnabled = isActive
+            let del = NSButton(title: "Löschen", target: self, action: #selector(deleteLayoutClicked(_:)))
+            del.identifier = NSUserInterfaceItemIdentifier(p.fingerprint)
+            let row = NSStackView(views: [name, apply, del])
+            row.spacing = 10
+            list.addArrangedSubview(row)
+        }
+    }
+
+    // MARK: Aktionen
+
+    @objc private func layoutsChanged() { rebuildLayoutsList() }
+    @objc private func saveLayoutClicked(_ sender: NSButton) { LayoutPresetStore.shared.saveCurrent() }
+    @objc private func applyLayoutClicked(_ sender: NSButton) {
+        guard let fp = sender.identifier?.rawValue,
+              let p = LayoutPresetStore.shared.preset(for: fp) else { return }
+        LayoutPresetStore.shared.apply(p)
+    }
+    @objc private func deleteLayoutClicked(_ sender: NSButton) {
+        guard let fp = sender.identifier?.rawValue else { return }
+        LayoutPresetStore.shared.delete(fingerprint: fp)
+    }
+
+    @objc private func toggleAutoMinimize(_ sender: NSButton) { SettingsStore.shared.autoMinimize = sender.state == .on }
+    @objc private func toggleRadial(_ sender: NSButton) { SettingsStore.shared.radialMenu = sender.state == .on }
+    @objc private func toggleLinked(_ sender: NSButton) { SettingsStore.shared.linkedEdges = sender.state == .on }
+    @objc private func toggleAutoApply(_ sender: NSButton) { SettingsStore.shared.autoApplyLayouts = sender.state == .on }
 
     @objc private func colorChanged(_ well: NSColorWell) {
         SettingsStore.shared.setMonitorColor(well.color, at: well.tag)

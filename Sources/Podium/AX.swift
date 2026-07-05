@@ -67,6 +67,12 @@ func axClose(_ el: AXUIElement) {
     AXUIElementPerformAction(btn as! AXUIElement, kAXPressAction as CFString)
 }
 
+// Fenster minimieren/entminimieren (echtes Dock-Minimieren, umkehrbar).
+func axSetMinimized(_ el: AXUIElement, _ minimized: Bool) {
+    AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString,
+                                 minimized ? kCFBooleanTrue : kCFBooleanFalse)
+}
+
 func axRaise(_ el: AXUIElement) {
     AXUIElementPerformAction(el, kAXRaiseAction as CFString)
     AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, kCFBooleanTrue)

@@ -33,6 +33,16 @@ func monitorAccent(_ index: Int) -> NSColor {
     return palette[index % palette.count]
 }
 
+// Kennung der aktuellen Monitor-Konstellation: Display-IDs sind über
+// Reconnects nicht stabil, Namen+Auflösung schon. Basis für Wake-Restore
+// und die gespeicherten Layouts.
+func displaySetFingerprint() -> String {
+    NSScreen.screens
+        .map { "\($0.localizedName):\(Int($0.frame.width))x\(Int($0.frame.height))" }
+        .sorted()
+        .joined(separator: "|")
+}
+
 func displayID(containing point: CGPoint, in displays: [Display]) -> CGDirectDisplayID? {
     if let hit = displays.first(where: { $0.full.contains(point) }) { return hit.id }
     // Randfälle (Rundung an Monitor-Grenzen) -> nächstgelegenen Monitor statt
