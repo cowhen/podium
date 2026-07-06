@@ -107,6 +107,21 @@ final class WindowManager {
         return rank
     }
 
+    // Andere echte Fenster auf einem Monitor, Front-zuerst, ohne floatende
+    // Apps (die nie ins erzwungene Bento-Raster sollen) und ohne das
+    // ausgeschlossene (gezogene) Fenster selbst. EINE Quelle für "wer spielt
+    // beim Bento-Layout mit" — von Drag-to-Edge und Radial-Menü genutzt,
+    // damit beide für dieselbe Geste dieselben Mitspieler wählen.
+    func otherWindows(on d: Display, excludingAX ax: AXUIElement, pid: pid_t, cfg: AppConfig) -> [WinInfo] {
+        let rank = zOrderRank()
+        let ds = currentDisplays()
+        return collectWindows(cfg: cfg)
+            .filter { !($0.pid == pid && CFEqual($0.ax, ax)) }
+            .filter { !cfg.isFloating(pid: $0.pid, name: $0.app) }
+            .filter { displayID(containing: CGPoint(x: $0.bounds.midX, y: $0.bounds.midY), in: ds) == d.id }
+            .sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
+    }
+
     // Pro Monitor nach echter Z-Order sortiert (vorderstes zuerst) — Startzustand
     // für die Zeilen im Overlay, bevor der Nutzer Fenster in die Karte zieht.
     func perMonitorOrder(displays: [Display], wins: [WinInfo], rank: [CGWindowID: Int]) -> [CGDirectDisplayID: [WinInfo]] {
@@ -136,13 +151,14 @@ final class WindowManager {
     // Sofort-Kacheln von bis zu 4 Fenstern eines einzelnen Monitors — für
     // Klick/Drag auf eine Monitor-Box im Overlay.
     func tileGroup(_ wins: [AXUIElement], on display: Display, split: Int, cross: Int = 0,
-                   mainR: CGFloat? = nil, crossR: CGFloat? = nil) {
+                   mainR: CGFloat? = nil, crossR: CGFloat? = nil, verticalOverride: Bool? = nil) {
         guard !wins.isEmpty else { return }
+        let vertical = verticalOverride ?? display.vertical
         let shown = Array(wins.prefix(Tuning.maxAssigned))
-        let frames = Layout.frames(visible: display.visible, vertical: display.vertical,
+        let frames = Layout.frames(visible: display.visible, vertical: vertical,
                                    count: shown.count, split: split, cross: cross,
                                    mainR: mainR, crossR: crossR)
-        tileShown(shown, frames: frames, vertical: display.vertical)
+        tileShown(shown, frames: frames, vertical: vertical)
     }
 
     // Für "floatende" Apps (siehe AppConfig.isFloating): Größe unangetastet,

@@ -1,9 +1,12 @@
 import AppKit
 import Carbon.HIToolbox
 
-// Radial-Menü im Loop-Stil (⌃⌥Space): erscheint am Mauszeiger, 8 Sektoren
-// für Hälften/Viertel plus Zentrum-Aktionen. Hover wählt, Klick wendet auf
-// das zuvor fokussierte Fenster an, Escape/Klick ins Zentrum bricht ab.
+// Radial-Menü im Loop-Stil (⌃⌥Space): erscheint am Mauszeiger, 8 Sektoren für
+// Ränder/Ecken. Hover wählt, Klick wendet auf das zuvor fokussierte Fenster
+// an, Escape/Klick ins Zentrum bricht ab. Nutzt BentoLayout — dasselbe
+// Vokabular wie Drag-to-Edge und die Box-Vorschau im Overlay: Ränder = sauberer
+// 2er-Split, Ecken = wachsendes Bento-Raster (bis zu 4 Fenster), "andere"
+// Fenster werden für ein sauberes Layout automatisch mit umgesetzt.
 // Abschaltbar in den Einstellungen.
 final class RadialMenu: NSObject {
     static let shared = RadialMenu()
@@ -16,40 +19,24 @@ final class RadialMenu: NSObject {
     private static let radius: CGFloat = 110
     private static let innerRadius: CGFloat = 34
 
-    // Sektoren im Uhrzeigersinn ab Osten: E, SE, S, SW, W, NW, N, NE.
-    // (Bildschirm-y wächst nach unten -> Winkel gespiegelt behandeln.)
-    private struct Action {
-        let symbol: String
-        let apply: (AXUIElement, Display) -> Void
-    }
-
-    private static func half(_ w: AXUIElement, _ d: Display, right: Bool) {
-        let f = Layout.frames(visible: d.visible, vertical: false, count: 2, split: 0)
-        axSetFrame(w, right ? f[1] : f[0])
-    }
-
-    private static func vhalf(_ w: AXUIElement, _ d: Display, bottom: Bool) {
-        let f = Layout.frames(visible: d.visible, vertical: true, count: 2, split: 0)
-        axSetFrame(w, bottom ? f[1] : f[0])
-    }
-
-    private static func quarter(_ w: AXUIElement, _ d: Display, right: Bool, bottom: Bool) {
-        let f = Layout.frames(visible: d.visible, vertical: false, count: 4, split: 0)
-        // Slots zeilen-major: 0=oben-links 1=oben-rechts 2=unten-links 3=unten-rechts
-        let idx = (bottom ? 2 : 0) + (right ? 1 : 0)
-        axSetFrame(w, f[idx])
-    }
-
-    private let actions: [Action] = [
-        Action(symbol: "rectangle.righthalf.filled") { half($0, $1, right: true) },
-        Action(symbol: "rectangle.inset.bottomright.filled") { quarter($0, $1, right: true, bottom: true) },
-        Action(symbol: "rectangle.bottomhalf.filled") { vhalf($0, $1, bottom: true) },
-        Action(symbol: "rectangle.inset.bottomleft.filled") { quarter($0, $1, right: false, bottom: true) },
-        Action(symbol: "rectangle.lefthalf.filled") { half($0, $1, right: false) },
-        Action(symbol: "rectangle.inset.topleft.filled") { quarter($0, $1, right: false, bottom: false) },
-        Action(symbol: "rectangle.fill") { w, d in axSetFrame(w, d.visible.insetBy(dx: Layout.gap, dy: Layout.gap)) },
-        Action(symbol: "rectangle.inset.topright.filled") { quarter($0, $1, right: true, bottom: false) },
+    // Sektoren im Uhrzeigersinn ab Osten, direkt auf BentoZone gemappt —
+    // dieselben 8 Zonen wie Drag-to-Edge (siehe BentoLayout.swift).
+    private static let zones: [BentoZone] = [
+        .right, .bottomRight, .bottom, .bottomLeft, .left, .topLeft, .top, .topRight,
     ]
+
+    private static func symbol(for zone: BentoZone) -> String {
+        switch zone {
+        case .right: return "rectangle.righthalf.filled"
+        case .bottomRight: return "rectangle.inset.bottomright.filled"
+        case .bottom: return "rectangle.bottomhalf.filled"
+        case .bottomLeft: return "rectangle.inset.bottomleft.filled"
+        case .left: return "rectangle.lefthalf.filled"
+        case .topLeft: return "rectangle.inset.topleft.filled"
+        case .top: return "rectangle.tophalf.filled"
+        case .topRight: return "rectangle.inset.topright.filled"
+        }
+    }
 
     func toggle() {
         window == nil ? show() : hide()
@@ -130,7 +117,7 @@ final class RadialMenu: NSObject {
             let angle = CGFloat(i) * .pi / 4
             let r = (Self.radius + Self.innerRadius) / 2
             let pos = CGPoint(x: c.x + cos(angle) * r, y: c.y - sin(angle) * r)
-            let img = NSImage(systemSymbolName: actions[i].symbol, accessibilityDescription: nil)?
+            let img = NSImage(systemSymbolName: Self.symbol(for: Self.zones[i]), accessibilityDescription: nil)?
                 .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .medium))
             let imgLayer = CALayer()
             imgLayer.contents = img?.tinted(.white)
@@ -176,14 +163,26 @@ final class RadialMenu: NSObject {
         highlighted = idx
     }
 
+    // Wendet die Zone konsistent zu Drag-to-Edge/Box an: "andere" Fenster auf
+    // demselben Monitor (Front-zuerst, ohne floatende Apps) füllen den Rest
+    // des Bento-Rasters mit, statt nur das Zielfenster isoliert zu setzen.
     fileprivate func commit() {
         defer { hide() }
-        guard highlighted >= 0, let t = target else { return }
-        guard let f = axFrame(t),
-              let d = currentDisplays().first(where: {
-                  $0.id == displayID(containing: CGPoint(x: f.midX, y: f.midY), in: currentDisplays())
-              }) else { return }
-        actions[highlighted].apply(t, d)
+        guard highlighted >= 0, let t = target, let f = axFrame(t) else { return }
+        let ds = currentDisplays()
+        guard let d = ds.first(where: { $0.id == displayID(containing: CGPoint(x: f.midX, y: f.midY), in: ds) })
+        else { return }
+        let zone = Self.zones[highlighted]
+        let others = appWM.otherWindows(on: d, excludingAX: t, pid: axPid(t), cfg: AppConfig.load())
+        let plan = BentoLayout.plan(zone: zone, othersAvailable: others.count)
+        let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)
+        for (i, token) in plan.tokens.enumerated() {
+            switch token {
+            case .dragged: axSetFrame(t, frames[i])
+            case .other(let n) where n < others.count: axSetFrame(others[n].ax, frames[i])
+            default: break
+            }
+        }
         axRaise(t)
     }
 }

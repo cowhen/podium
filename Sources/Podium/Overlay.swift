@@ -41,6 +41,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
         get { model.stage }
         set { model.stage = newValue }
     }
+    // Rand-/Eck-Drop erzwingt eine bestimmte Stapelrichtung (top/bottom vs.
+    // links/rechts) unabhängig von der Monitor-Ausrichtung — siehe arrangeByZone.
+    // Nil = Standard (Monitor-Ausrichtung, display.vertical).
+    private var forcedVertical: [CGDirectDisplayID: Bool] = [:]
+
     private var splitMode: [CGDirectDisplayID: Int] {
         get { model.splitMode }
         set { model.splitMode = newValue }
@@ -90,6 +95,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard !ds.isEmpty else { return }
         displays = ds
         displayColors = Dictionary(uniqueKeysWithValues: ds.enumerated().map { ($0.element.id, monitorAccent($0.offset)) })
+        forcedVertical = [:]
 
         cfg = AppConfig.load()
         allWins = appWM.collectWindows(cfg: cfg)
@@ -414,6 +420,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Fenster per Tastatur/Maus ins Raster eines Monitors zuordnen (wie
     // externer Box-Drop). Nur für nicht-floatende Fenster — siehe place().
     private func assign(_ info: WinInfo, to id: CGDirectDisplayID) {
+        forcedVertical[id] = nil   // nicht Zonen-gesteuert: Monitor-Standardausrichtung
         let sourceBox = model.dropFromOutside(info, onto: id)
         retile(id)
         if let sourceBox, sourceBox != id { retile(sourceBox) }
@@ -820,6 +827,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         assigned[id] = take
         splitMode[id] = 0
         crossMode[id] = 0
+        forcedVertical[id] = nil   // nicht Zonen-gesteuert: Monitor-Standardausrichtung
         retile(id)
         refreshStage()
         take.forEach { pulseTile($0, in: id) }
@@ -841,17 +849,56 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
 
         if let from = assigned[id]?.firstIndex(where: { $0.windowID == info.windowID }) {
-            // Innerhalb derselben Box: Plätze tauschen.
+            // Innerhalb derselben Box: Plätze tauschen (zwei Fenster
+            // übereinander ziehen = sie tauschen die Position).
             guard let hit = hitIdx, hit != from else { return }
             model.swapInBox(id, from, hit)
             retile(id)
         } else {
-            let sourceBox = model.dropFromOutside(info, onto: id, preferredSlot: hitIdx)
-            retile(id)
-            if let sourceBox, sourceBox != id { retile(sourceBox) }
-            refreshStage()
+            let existing = assigned[id] ?? []
+            if existing.count < Tuning.maxAssigned, let zone = mapBoxes[id]?.bentoZone(atWindowPoint: p) {
+                // An einen Rand/eine Ecke der Box gezogen: das Bento-Raster
+                // dort gezielt aufbauen/erweitern (Rand = 2er-Split, Ecke =
+                // Raster wächst um einen Slot) — konsistent zu Drag-to-Edge
+                // und Radial-Menü, statt blind ans Ende anzuhängen.
+                let sourceBox = removeEverywhere(info)
+                arrangeByZone(zone, dragged: info, existing: existing, onto: id)
+                retile(id)
+                if let sourceBox, sourceBox != id { retile(sourceBox) }
+                refreshStage()
+            } else {
+                let sourceBox = model.dropFromOutside(info, onto: id, preferredSlot: hitIdx)
+                retile(id)
+                if let sourceBox, sourceBox != id { retile(sourceBox) }
+                refreshStage()
+            }
         }
         pulseTile(info, in: id)
+    }
+
+    // Baut assigned[id] nach BentoLayout.plan neu auf: gezogenes Fenster an
+    // die Zonen-Position, vorhandene Fenster füllen die restlichen Slots in
+    // ihrer bisherigen Reihenfolge; was nicht mehr reinpasst, geht auf die Bühne.
+    private func arrangeByZone(_ zone: BentoZone, dragged: WinInfo, existing: [WinInfo], onto id: CGDirectDisplayID) {
+        let plan = BentoLayout.plan(zone: zone, othersAvailable: existing.count)
+        var newArr: [WinInfo] = []
+        for token in plan.tokens {
+            switch token {
+            case .dragged: newArr.append(dragged)
+            case .other(let n) where n < existing.count: newArr.append(existing[n])
+            default: break
+            }
+        }
+        if existing.count > newArr.count - 1 {
+            stage.insert(contentsOf: existing.dropFirst(newArr.count - 1), at: 0)
+        }
+        assigned[id] = newArr
+        splitMode[id] = 0
+        crossMode[id] = 0
+        // Rand-Zonen erzwingen ihre Stapelrichtung unabhängig von der Monitor-
+        // Ausrichtung (oben/unten bleibt oben/unten, auch quer); Ecken (immer
+        // "false" laut BentoLayout) lassen die Monitor-Ausrichtung gelten.
+        forcedVertical[id] = plan.vertical
     }
 
     private func demote(_ info: WinInfo) {
@@ -1040,9 +1087,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func retile(_ id: CGDirectDisplayID) {
         guard let d = displays.first(where: { $0.id == id }) else { return }
         let wins = assigned[id] ?? []
+        let vOverride = forcedVertical[id]
         if !wins.isEmpty {
             LinkedEdges.shared.suppress()
-            appWM.tileGroup(wins.map { $0.ax }, on: d, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
+            appWM.tileGroup(wins.map { $0.ax }, on: d, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
+                            verticalOverride: vOverride)
             let fresh = wins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
             // Thumbnails umgroßter Fenster sofort verwerfen — schnelle Apps
             // haben ihre neuen Bounds schon jetzt, und syncBounds würde die
@@ -1057,7 +1106,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                                      crossR: Layout.ratio(crossMode[id] ?? 0))
         }
         applyStack(id)
-        mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0, ghosts: ghostWins(for: id))
+        mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
+                                  ghosts: ghostWins(for: id), verticalOverride: vOverride)
         updateSelectionUI()
         // Manche Apps (v.a. Electron wie Teams) wenden das Setzen verzögert
         // an — der sofortige Readback zeigt dann noch alte Bounds. Später den
@@ -1083,7 +1133,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // neue Kachel den Abzug von VOR dem Kacheln (falsche Größe/Proportion).
         changed.forEach { ThumbnailCache.shared.remove($0) }
         assigned[id] = fresh
-        mapBoxes[id]?.setAssigned(fresh, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0, ghosts: ghostWins(for: id))
+        mapBoxes[id]?.setAssigned(fresh, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
+                                  ghosts: ghostWins(for: id), verticalOverride: forcedVertical[id])
         updateSelectionUI()
     }
 
@@ -1106,8 +1157,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
         // Geister-Kacheln folgen dem Bühnen-Inhalt (z. B. nach Zuordnen/Lösen).
         for d in displays {
-            mapBoxes[d.id]?.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0,
-                                        cross: crossMode[d.id] ?? 0, ghosts: ghostWins(for: d.id))
+            mapBoxes[d.id]?.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0, cross: crossMode[d.id] ?? 0,
+                                        ghosts: ghostWins(for: d.id), verticalOverride: forcedVertical[d.id])
         }
         resizeToFitStage()
         updateSelectionUI()

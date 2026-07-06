@@ -157,7 +157,8 @@ final class MonitorMapBox: NSView {
     // vollständigen Ist-Zustand zeigt — ein halb verdecktes Fenster ist
     // sonst "unsichtbar", obwohl es real auf dem Schirm steht. Kacheln
     // gleicher Fenster gleiten animiert an ihre neue Position.
-    func setAssigned(_ wins: [WinInfo], split: Int, cross: Int, ghosts: [WinInfo] = []) {
+    func setAssigned(_ wins: [WinInfo], split: Int, cross: Int, ghosts: [WinInfo] = [], verticalOverride: Bool? = nil) {
+        let vertical = verticalOverride ?? display.vertical
         var oldFrames: [CGWindowID: NSRect] = [:]
         for t in tiles { oldFrames[t.info.windowID] = t.frame }
         tiles.forEach { $0.removeFromSuperview() }
@@ -207,7 +208,7 @@ final class MonitorMapBox: NSView {
         // denn App-Mindestgrößen (v.a. auf dem Hochkant-Monitor) lassen die
         // Realität leicht vom Raster abweichen und dürfen das Ziehen nicht
         // deaktivieren.
-        let grid = Layout.frames(visible: bounds, vertical: display.vertical, count: wins.count, split: split, cross: cross)
+        let grid = Layout.frames(visible: bounds, vertical: vertical, count: wins.count, split: split, cross: cross)
         let tolX = bounds.width * 0.08, tolY = bounds.height * 0.08
         let matchesGrid = zip(rects, grid).allSatisfy { r, g in
             abs(r.minX - g.minX) < tolX && abs(r.minY - g.minY) < tolY &&
@@ -218,7 +219,7 @@ final class MonitorMapBox: NSView {
         func clampY(_ v: CGFloat) -> CGFloat { max(6, min(bounds.height - 6, v)) }
 
         if wins.count >= 2 {
-            let verticalSeam = display.vertical && wins.count <= 3
+            let verticalSeam = vertical && wins.count <= 3
             if verticalSeam {
                 let below = wins.count == 2 ? rects[1].minY : min(rects[1].minY, rects[2].minY)
                 let y = clampY((rects[0].maxY + below) / 2)
@@ -246,7 +247,7 @@ final class MonitorMapBox: NSView {
             }
         }
         if wins.count >= 3 {
-            let crossVertical = display.vertical && wins.count == 3   // Fuge verläuft vertikal
+            let crossVertical = vertical && wins.count == 3   // Fuge verläuft vertikal
             if crossVertical {
                 let x = clampX((rects[1].maxX + rects[2].minX) / 2)
                 let y0 = min(rects[1].minY, rects[2].minY), y1 = max(rects[1].maxY, rects[2].maxY)
@@ -301,6 +302,16 @@ final class MonitorMapBox: NSView {
     func dropSlot(atWindowPoint p: NSPoint) -> Int? {
         let local = convert(p, from: nil)
         return tiles.firstIndex { $0.frame.contains(local) }
+    }
+
+    // Rand-/Eck-Zone eines Drop-Punkts relativ zur Box (siehe BentoLayout) —
+    // macht "an den Rand der Box ziehen" konsistent zu Drag-to-Edge und
+    // Radial-Menü. Zonen-Größen proportional zur (skalierten) Box, nicht
+    // die festen Bildschirm-Werte.
+    func bentoZone(atWindowPoint p: NSPoint) -> BentoZone? {
+        let local = convert(p, from: nil)
+        let short = min(bounds.width, bounds.height)
+        return BentoLayout.zone(in: bounds, point: local, margin: max(10, short * 0.14), cornerSize: short * 0.32)
     }
 
     var hitAreaInWindow: NSRect { convert(bounds.insetBy(dx: -14, dy: -14), to: nil) }

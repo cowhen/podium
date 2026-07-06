@@ -3,9 +3,11 @@ import ApplicationServices
 
 // Drag-to-Edge-Snap fürs echte Ziehen auf dem Desktop (wie Windows Aero Snap /
 // Rectangle): zieht man ein Fenster an den Rand, zeigt eine Vorschau die
-// Zielhälfte, beim Loslassen wird sie übernommen. Zwei so gezogene Fenster
-// (eins nach links, eins nach rechts) ergeben automatisch einen echten 50/50-
-// Split, weil beide dieselben Layout.frames-Hälften treffen.
+// Zielhälfte, in eine Ecke zeigt sie ein wachsendes Bento-Raster (bis zu 4
+// Fenster). Beim Loslassen wird die Anordnung übernommen — inklusive der
+// "anderen" beteiligten Fenster, die für ein sauberes Layout mit umgesetzt
+// werden. Nutzt BentoLayout — dasselbe Vokabular wie Radial-Menü und die
+// Box-Vorschau im Overlay, damit sich die Geste überall gleich verhält.
 //
 // Rein per NSEvent-Globalmonitor (öffentliche API, nur Lesezugriff, kann
 // anders als ein CGEventTap keine Events blockieren/verändern) — kein Hack,
@@ -15,17 +17,19 @@ import ApplicationServices
 final class DragSnapManager {
     static let shared = DragSnapManager()
 
-    private enum Zone { case left, right, top, bottom }
+    private static let margin: CGFloat = 24
+    private static let cornerSize: CGFloat = 90
 
     private var downMonitor: Any?
     private var draggedMonitor: Any?
     private var upMonitor: Any?
 
     private var candidate: AXUIElement?
+    private var candidatePid: pid_t = 0
     private var originalFrame: CGRect?
     private var isDragging = false
-    private var activeZone: Zone?
-    private var previewWindow: NSWindow?
+    private var activeZone: BentoZone?
+    private var previewWindows: [NSWindow] = []
 
     func start() {
         guard downMonitor == nil else { return }
@@ -52,6 +56,7 @@ final class DragSnapManager {
         let win = (w as! AXUIElement)
         guard isManageable(win) else { return }
         candidate = win
+        candidatePid = app.processIdentifier
         originalFrame = axFrame(win)
     }
 
@@ -69,14 +74,16 @@ final class DragSnapManager {
 
     private func handleUp() {
         defer { candidate = nil; originalFrame = nil; isDragging = false; hidePreview() }
-        guard isDragging, let c = candidate, let zone = activeZone,
-              let d = displayUnderMouse() else { return }
-        let frames = Layout.frames(visible: d.visible, vertical: false, count: 2, split: 0)
-        switch zone {
-        case .left: axSetFrame(c, frames[0])
-        case .right: axSetFrame(c, frames[1])
-        case .top: axSetFrame(c, Layout.frames(visible: d.visible, vertical: true, count: 2, split: 0)[0])
-        case .bottom: axSetFrame(c, Layout.frames(visible: d.visible, vertical: true, count: 2, split: 0)[1])
+        guard isDragging, let c = candidate, let zone = activeZone, let d = displayUnderMouse() else { return }
+        let others = appWM.otherWindows(on: d, excludingAX: c, pid: candidatePid, cfg: AppConfig.load())
+        let plan = BentoLayout.plan(zone: zone, othersAvailable: others.count)
+        let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)
+        for (i, token) in plan.tokens.enumerated() {
+            switch token {
+            case .dragged: axSetFrame(c, frames[i])
+            case .other(let n) where n < others.count: axSetFrame(others[n].ax, frames[i])
+            default: break
+            }
         }
         axRaise(c)
     }
@@ -92,46 +99,30 @@ final class DragSnapManager {
         return ds.first { $0.id == id }
     }
 
-    private static let margin: CGFloat = 24
-
-    private func zone(in d: Display, quartzPoint q: CGPoint) -> Zone? {
-        let f = d.full
-        if q.x - f.minX < Self.margin { return .left }
-        if f.maxX - q.x < Self.margin { return .right }
-        if q.y - f.minY < Self.margin { return .top }       // Quartz: kleines y = oben
-        if f.maxY - q.y < Self.margin { return .bottom }
-        return nil
-    }
-
     private func updatePreview() {
-        guard let d = displayUnderMouse() else { hidePreview(); return }
+        guard let d = displayUnderMouse() else { activeZone = nil; hidePreview(); return }
         let mouse = NSEvent.mouseLocation
         let primaryH = NSScreen.screens.first?.frame.height ?? 0
         let q = CGPoint(x: mouse.x, y: primaryH - mouse.y)
-        guard let z = zone(in: d, quartzPoint: q) else {
+        guard let z = BentoLayout.zone(in: d.full, point: q, margin: Self.margin, cornerSize: Self.cornerSize) else {
             activeZone = nil
             hidePreview()
             return
         }
         guard z != activeZone else { return }
         activeZone = z
-        let frames2H = Layout.frames(visible: d.visible, vertical: false, count: 2, split: 0)
-        let frames2V = Layout.frames(visible: d.visible, vertical: true, count: 2, split: 0)
-        let quartzRect: CGRect
-        switch z {
-        case .left: quartzRect = frames2H[0]
-        case .right: quartzRect = frames2H[1]
-        case .top: quartzRect = frames2V[0]
-        case .bottom: quartzRect = frames2V[1]
-        }
-        showPreview(quartzRect: quartzRect)
+        let others = appWM.otherWindows(on: d, excludingAX: candidate!, pid: candidatePid, cfg: AppConfig.load())
+        let plan = BentoLayout.plan(zone: z, othersAvailable: others.count)
+        guard let draggedIdx = plan.tokens.firstIndex(of: .dragged) else { hidePreview(); return }
+        let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)
+        showPreview(quartzRect: frames[draggedIdx])
     }
 
     private func showPreview(quartzRect: CGRect) {
         let primaryH = NSScreen.screens.first?.frame.height ?? 0
         let rect = NSRect(x: quartzRect.minX, y: primaryH - quartzRect.maxY,
                           width: quartzRect.width, height: quartzRect.height)
-        if previewWindow == nil {
+        if previewWindows.isEmpty {
             let win = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
             win.isOpaque = false
             win.backgroundColor = .clear
@@ -148,14 +139,14 @@ final class DragSnapManager {
             view.layer?.cornerRadius = 12
             view.layer?.cornerCurve = .continuous
             win.contentView = view
-            previewWindow = win
+            previewWindows = [win]
         }
-        previewWindow?.setFrame(rect, display: true)
-        previewWindow?.orderFrontRegardless()
+        previewWindows[0].setFrame(rect, display: true)
+        previewWindows[0].orderFrontRegardless()
     }
 
     private func hidePreview() {
         activeZone = nil
-        previewWindow?.orderOut(nil)
+        previewWindows.forEach { $0.orderOut(nil) }
     }
 }
