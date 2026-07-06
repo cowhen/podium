@@ -316,4 +316,11 @@ final class MonitorMapBox: NSView {
     // Verhindert, dass Klicks auf freie Fläche zum Hintergrund hochbubbeln
     // und das Overlay schließen.
     override func mouseDown(with event: NSEvent) {}
+
+    // Rechtsklick: Monitor-Modus wählen (Split vs. Tab-Stapel). Über
+    // menu(for:) statt rightMouseDown — das greift auch, wenn der Klick auf
+    // einer Kachel landet (AppKit ruft das den Responder-Chain hoch auf).
+    override func menu(for event: NSEvent) -> NSMenu? {
+        controller?.modeMenu(for: display.id)
+    }
 }

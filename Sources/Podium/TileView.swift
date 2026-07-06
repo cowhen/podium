@@ -194,6 +194,14 @@ final class WindowTileView: NSView {
     override func mouseEntered(with event: NSEvent) { controller?.tileHoverBegan(self) }
     override func mouseExited(with event: NSEvent) { controller?.tileHoverEnded(self) }
 
+    // Rechtsklick: Modus-Menü der Box, der diese Kachel zugeordnet ist
+    // (nil auf der Bühne — kein Menü dort). Direkt hier statt auf die
+    // Responder-Chain zu vertrauen, da Kacheln fast die ganze Box ausfüllen
+    // und damit fast immer den Rechtsklick zuerst abbekommen.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        controller?.modeMenu(forTileOwning: info)
+    }
+
     // MARK: Drag
 
     override func mouseDown(with event: NSEvent) { dragStart = event.locationInWindow }

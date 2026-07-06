@@ -974,6 +974,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
         refreshStage()
     }
 
+    // Rechtsklick direkt auf eine Kachel: Menü der Box, der sie zugeordnet
+    // ist (Kacheln füllen fast die ganze Box, das ist der Normalfall).
+    // Bühnen-Kacheln (kein boxOwner) haben keinen Modus-Menüpunkt.
+    func modeMenu(forTileOwning info: WinInfo) -> NSMenu? {
+        guard let id = boxOwner(of: info) else { return nil }
+        return modeMenu(for: id)
+    }
+
     // Rechtsklick auf eine Monitor-Box (oder eine Kachel darin): Modus wählen.
     func modeMenu(for id: CGDirectDisplayID) -> NSMenu {
         let menu = NSMenu()
