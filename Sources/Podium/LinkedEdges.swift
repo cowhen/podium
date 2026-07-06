@@ -11,6 +11,8 @@ final class LinkedEdges {
 
     private struct Group {
         let display: Display
+        let vertical: Bool        // tatsächliche Stapelrichtung (kann per Zone
+                                  // erzwungen sein und von display.vertical abweichen)
         var wins: [AXUIElement]   // Slot-Reihenfolge wie beim Kacheln
         var tokens: [AXObserverCenter.Token]
         var mainR: CGFloat
@@ -23,7 +25,7 @@ final class LinkedEdges {
 
     // Nach jedem Kacheln aufgerufen: Gruppe (neu) registrieren.
     func track(displayID id: CGDirectDisplayID, display: Display, wins: [AXUIElement],
-               mainR: CGFloat, crossR: CGFloat) {
+               mainR: CGFloat, crossR: CGFloat, vertical: Bool? = nil) {
         untrack(id)
         guard SettingsStore.shared.linkedEdges, wins.count >= 2 else { return }
         var tokens: [AXObserverCenter.Token] = []
@@ -38,7 +40,8 @@ final class LinkedEdges {
                 }
             }
         }
-        groups[id] = Group(display: display, wins: wins, tokens: tokens, mainR: mainR, crossR: crossR)
+        groups[id] = Group(display: display, vertical: vertical ?? display.vertical,
+                           wins: wins, tokens: tokens, mainR: mainR, crossR: crossR)
     }
 
     func untrack(_ id: CGDirectDisplayID) {
@@ -84,10 +87,10 @@ final class LinkedEdges {
 
         switch g.wins.count {
         case 2:
-            let frac = d.vertical ? f.height / totalH : f.width / totalW
+            let frac = g.vertical ? f.height / totalH : f.width / totalW
             g.mainR = clamp(slot == 0 ? frac : 1 - frac)
         case 3:
-            if d.vertical {
+            if g.vertical {
                 if slot == 0 {
                     g.mainR = clamp(f.height / totalH)
                 } else {
@@ -108,7 +111,7 @@ final class LinkedEdges {
         }
         groups[id] = g
 
-        let frames = Layout.frames(visible: d.visible, vertical: d.vertical, count: g.wins.count,
+        let frames = Layout.frames(visible: d.visible, vertical: g.vertical, count: g.wins.count,
                                    split: 0, cross: 0, mainR: g.mainR, crossR: g.crossR)
         suppress(for: 0.4)
         for (i, w) in g.wins.enumerated() where i != slot {

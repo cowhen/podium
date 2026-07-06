@@ -755,14 +755,24 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let stageOn = boxID == nil && boxOwner(of: info) != nil
             && stageView?.hitAreaInWindow.contains(p) == true
 
+        // Zonen-Vorschau: alle Boxen zurücksetzen, dann in der Ziel-Box den
+        // Slot zeigen, den der Drop treffen würde (Rand/Ecke) — dieselbe Optik
+        // wie die On-Screen-Vorschau, nur box-lokal.
+        for b in mapBoxes.values { b.hideZonePreview() }
+
         var candidate: WindowTileView?
         if let id = boxID, let box = mapBoxes[id] {
             let arr = assigned[id] ?? []
             let isInternal = arr.contains { $0.windowID == info.windowID }
-            let wouldReplace = isInternal || arr.count >= Tuning.maxAssigned
-            if wouldReplace, let idx = box.dropSlot(atWindowPoint: p),
-               arr.indices.contains(idx), arr[idx].windowID != info.windowID {
-                candidate = box.tiles[idx]
+            if !isInternal, arr.count < Tuning.maxAssigned, let zone = box.bentoZone(atWindowPoint: p) {
+                // Freier Rand/Ecke: Bento-Vorschau statt Tausch-Markierung.
+                box.showZonePreview(zone: zone, othersCount: arr.count)
+            } else {
+                let wouldReplace = isInternal || arr.count >= Tuning.maxAssigned
+                if wouldReplace, let idx = box.dropSlot(atWindowPoint: p),
+                   arr.indices.contains(idx), arr[idx].windowID != info.windowID {
+                    candidate = box.tiles[idx]
+                }
             }
         }
         setHover(box: boxID, stage: stageOn, tile: candidate)
@@ -789,7 +799,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func clearHover() { setHover(box: nil, stage: false, tile: nil) }
+    private func clearHover() {
+        setHover(box: nil, stage: false, tile: nil)
+        for b in mapBoxes.values { b.hideZonePreview() }
+    }
 
     // MARK: Drop
 
@@ -857,17 +870,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
         } else {
             let existing = assigned[id] ?? []
             if existing.count < Tuning.maxAssigned, let zone = mapBoxes[id]?.bentoZone(atWindowPoint: p) {
-                // An einen Rand/eine Ecke der Box gezogen: das Bento-Raster
-                // dort gezielt aufbauen/erweitern (Rand = 2er-Split, Ecke =
-                // Raster wächst um einen Slot) — konsistent zu Drag-to-Edge
-                // und Radial-Menü, statt blind ans Ende anzuhängen.
-                let sourceBox = removeEverywhere(info)
-                arrangeByZone(zone, dragged: info, existing: existing, onto: id)
-                retile(id)
-                if let sourceBox, sourceBox != id { retile(sourceBox) }
-                refreshStage()
+                // An einen Rand/eine Ecke der Box gezogen: EXAKT dieselbe
+                // Routine wie Drag-to-Edge und Radial (BentoApply) auf die
+                // echten Fenster, danach das Modell aus der Realität nachziehen.
+                applyZone(zone, dragged: info, onto: id)
             } else {
                 let sourceBox = model.dropFromOutside(info, onto: id, preferredSlot: hitIdx)
+                forcedVertical[id] = nil
                 retile(id)
                 if let sourceBox, sourceBox != id { retile(sourceBox) }
                 refreshStage()
@@ -876,29 +885,38 @@ final class OverlayController: NSObject, NSWindowDelegate {
         pulseTile(info, in: id)
     }
 
-    // Baut assigned[id] nach BentoLayout.plan neu auf: gezogenes Fenster an
-    // die Zonen-Position, vorhandene Fenster füllen die restlichen Slots in
-    // ihrer bisherigen Reihenfolge; was nicht mehr reinpasst, geht auf die Bühne.
-    private func arrangeByZone(_ zone: BentoZone, dragged: WinInfo, existing: [WinInfo], onto id: CGDirectDisplayID) {
+    // Zonen-Drop im Overlay: die gemeinsame BentoApply-Routine positioniert die
+    // echten Fenster (gezogenes + bisheriger Box-Inhalt als Mitspieler) und
+    // registriert verbundene Ränder — identisch zu Drag-to-Edge und Radial.
+    // Danach wird das Modell aus dem Ergebnis nachgezogen: platzierte Fenster =
+    // neuer Box-Inhalt (frische Bounds; die Box zeichnet Kacheln aus echten
+    // Bounds, ein Einzel-Fenster an der Kante bleibt also halb), verdrängte
+    // zurück auf die Bühne. Kein dichter retile-Pfad, der die Hälfte wieder
+    // auf Vollfläche kacheln würde.
+    private func applyZone(_ zone: BentoZone, dragged info: WinInfo, onto id: CGDirectDisplayID) {
+        guard let d = displays.first(where: { $0.id == id }) else { return }
+        let existing = assigned[id] ?? []
         let plan = BentoLayout.plan(zone: zone, othersAvailable: existing.count)
-        var newArr: [WinInfo] = []
-        for token in plan.tokens {
-            switch token {
-            case .dragged: newArr.append(dragged)
-            case .other(let n) where n < existing.count: newArr.append(existing[n])
-            default: break
-            }
+        let sourceBox = removeEverywhere(info)
+        let ordered = BentoApply.apply(zone: zone, dragged: info.ax,
+                                       others: existing.map { $0.ax }, display: d)
+        // Ergebnis in WinInfos rückübersetzen (frische Bounds), Reihenfolge = Slots.
+        let pool = [info] + existing
+        var newAssigned: [WinInfo] = []
+        for ax in ordered {
+            guard let w = pool.first(where: { CFEqual($0.ax, ax) }) else { continue }
+            newAssigned.append(axFrame(ax).map { w.with(bounds: $0) } ?? w)
         }
-        if existing.count > newArr.count - 1 {
-            stage.insert(contentsOf: existing.dropFirst(newArr.count - 1), at: 0)
-        }
-        assigned[id] = newArr
+        assigned[id] = newAssigned
+        // Nicht platzierte bisherige Box-Fenster (z. B. bei 2er-Kante) -> Bühne.
+        let placed = Set(newAssigned.map { $0.windowID })
+        stage.insert(contentsOf: existing.filter { !placed.contains($0.windowID) }, at: 0)
         splitMode[id] = 0
         crossMode[id] = 0
-        // Rand-Zonen erzwingen ihre Stapelrichtung unabhängig von der Monitor-
-        // Ausrichtung (oben/unten bleibt oben/unten, auch quer); Ecken (immer
-        // "false" laut BentoLayout) lassen die Monitor-Ausrichtung gelten.
         forcedVertical[id] = plan.vertical
+        refreshBox(id)
+        if let sourceBox, sourceBox != id { retile(sourceBox) }
+        refreshStage()
     }
 
     private func demote(_ info: WinInfo) {
@@ -1103,11 +1121,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
             // Verbundene Ränder: Gruppe für Live-Folgen registrieren.
             LinkedEdges.shared.track(displayID: id, display: d, wins: wins.map { $0.ax },
                                      mainR: Layout.ratio(splitMode[id] ?? 0),
-                                     crossR: Layout.ratio(crossMode[id] ?? 0))
+                                     crossR: Layout.ratio(crossMode[id] ?? 0), vertical: vOverride)
         }
+        refreshBox(id)
+    }
+
+    // View-Auffrischung + verzögerter Bounds-Sync, OHNE selbst Frames zu
+    // setzen. Von retile (nach tileGroup) UND vom Zonen-Drop (nach BentoApply)
+    // genutzt — so teilen der dichte Pfad und der Zonen-Pfad denselben
+    // Nachlauf, statt ihn zu duplizieren.
+    private func refreshBox(_ id: CGDirectDisplayID) {
         applyStack(id)
         mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
-                                  ghosts: ghostWins(for: id), verticalOverride: vOverride)
+                                  ghosts: ghostWins(for: id), verticalOverride: forcedVertical[id])
         updateSelectionUI()
         // Manche Apps (v.a. Electron wie Teams) wenden das Setzen verzögert
         // an — der sofortige Readback zeigt dann noch alte Bounds. Später den

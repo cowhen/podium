@@ -63,6 +63,7 @@ final class MonitorMapBox: NSView {
     private lazy var mainHandle = SeamHandleView(kind: .main, box: self)
     private lazy var crossHandle = SeamHandleView(kind: .cross, box: self)
     private let emptyHint = NSTextField(labelWithString: "Fenster hierher ziehen")
+    private let zonePreview = NSView()   // Live-Vorschau des Ziel-Slots beim Zonen-Drag
     private(set) var tiles: [WindowTileView] = []
     private(set) var ghostTiles: [WindowTileView] = []   // Hintergrund-Fenster, nicht im Raster
     weak var controller: OverlayController?
@@ -111,7 +112,31 @@ final class MonitorMapBox: NSView {
 
         setupPill(bg: ratioPillBG, label: ratioPill)
         setupPill(bg: crossPillBG, label: crossPill)
+
+        zonePreview.wantsLayer = true
+        zonePreview.layer?.backgroundColor = accent.withAlphaComponent(0.30).cgColor
+        zonePreview.layer?.borderWidth = 2
+        zonePreview.layer?.borderColor = accent.cgColor
+        zonePreview.layer?.cornerRadius = 8
+        zonePreview.layer?.cornerCurve = .continuous
+        zonePreview.isHidden = true
+        addSubview(zonePreview)
     }
+
+    // Live-Vorschau: Ziel-Slot des gezogenen Fensters für eine Zone anzeigen
+    // (dieselbe Plan-/Frame-Logik wie beim echten Drop). othersCount = Fenster,
+    // die schon in der Box sind (= Mitspieler beim Drop).
+    func showZonePreview(zone: BentoZone, othersCount: Int) {
+        let plan = BentoLayout.plan(zone: zone, othersAvailable: othersCount)
+        guard let di = plan.tokens.firstIndex(of: .dragged) else { hideZonePreview(); return }
+        let vertical = plan.vertical ?? display.vertical
+        let frames = Layout.frames(visible: bounds, vertical: vertical, count: plan.tokens.count, split: 0)
+        zonePreview.frame = frames[di]
+        zonePreview.isHidden = false
+        addSubview(zonePreview, positioned: .above, relativeTo: nil)
+    }
+
+    func hideZonePreview() { zonePreview.isHidden = true }
 
     private func setupPill(bg: NSView, label: NSTextField) {
         bg.wantsLayer = true

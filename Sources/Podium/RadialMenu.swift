@@ -174,16 +174,7 @@ final class RadialMenu: NSObject {
         else { return }
         let zone = Self.zones[highlighted]
         let others = appWM.otherWindows(on: d, excludingAX: t, pid: axPid(t), cfg: AppConfig.load())
-        let plan = BentoLayout.plan(zone: zone, othersAvailable: others.count)
-        let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)
-        for (i, token) in plan.tokens.enumerated() {
-            switch token {
-            case .dragged: axSetFrame(t, frames[i])
-            case .other(let n) where n < others.count: axSetFrame(others[n].ax, frames[i])
-            default: break
-            }
-        }
-        axRaise(t)
+        BentoApply.apply(zone: zone, dragged: t, others: others.map { $0.ax }, display: d)
     }
 }
 

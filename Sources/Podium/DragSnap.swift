@@ -76,16 +76,7 @@ final class DragSnapManager {
         defer { candidate = nil; originalFrame = nil; isDragging = false; hidePreview() }
         guard isDragging, let c = candidate, let zone = activeZone, let d = displayUnderMouse() else { return }
         let others = appWM.otherWindows(on: d, excludingAX: c, pid: candidatePid, cfg: AppConfig.load())
-        let plan = BentoLayout.plan(zone: zone, othersAvailable: others.count)
-        let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)
-        for (i, token) in plan.tokens.enumerated() {
-            switch token {
-            case .dragged: axSetFrame(c, frames[i])
-            case .other(let n) where n < others.count: axSetFrame(others[n].ax, frames[i])
-            default: break
-            }
-        }
-        axRaise(c)
+        BentoApply.apply(zone: zone, dragged: c, others: others.map { $0.ax }, display: d)
     }
 
     // MARK: Zonen & Vorschau
