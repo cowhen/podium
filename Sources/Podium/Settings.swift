@@ -92,6 +92,11 @@ final class SettingsStore {
         get { flag("autoApplyLayouts", default: false) }
         set { setFlag("autoApplyLayouts", newValue) }
     }
+    // Fenster beim Ziehen an den Bildschirmrand auf die halbe Fläche snappen.
+    var dragSnap: Bool {
+        get { flag("dragSnap", default: true) }
+        set { setFlag("dragSnap", newValue) }
+    }
 
     // MARK: Monitor-Farben
 
@@ -382,6 +387,9 @@ final class SettingsWindowController: NSWindowController {
         st.addArrangedSubview(toggleRow("Layouts automatisch anwenden",
             "Beim Erkennen eines gespeicherten Monitor-Setups das Layout wiederherstellen.",
             isOn: SettingsStore.shared.autoApplyLayouts, action: #selector(toggleAutoApply(_:))))
+        st.addArrangedSubview(toggleRow("Drag-to-Edge-Snap",
+            "Ein Fenster an den Bildschirmrand ziehen füllt die halbe Fläche — zwei so gezogene Fenster ergeben einen Split.",
+            isOn: SettingsStore.shared.dragSnap, action: #selector(toggleDragSnap(_:))))
         return st
     }
 
@@ -502,6 +510,7 @@ final class SettingsWindowController: NSWindowController {
     @objc private func toggleRadial(_ sender: NSButton) { SettingsStore.shared.radialMenu = sender.state == .on }
     @objc private func toggleLinked(_ sender: NSButton) { SettingsStore.shared.linkedEdges = sender.state == .on }
     @objc private func toggleAutoApply(_ sender: NSButton) { SettingsStore.shared.autoApplyLayouts = sender.state == .on }
+    @objc private func toggleDragSnap(_ sender: NSButton) { SettingsStore.shared.dragSnap = sender.state == .on }
 
     @objc private func colorChanged(_ well: NSColorWell) {
         SettingsStore.shared.setMonitorColor(well.color, at: well.tag)

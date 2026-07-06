@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyHotkey()
         applyRadial()
         DirectActions.register()
+        DragSnapManager.shared.start()
         RestoreCenter.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: SettingsStore.changed, object: nil)

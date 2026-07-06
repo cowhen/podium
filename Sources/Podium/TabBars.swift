@@ -34,6 +34,8 @@ final class TabBars {
         panel.hasShadow = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // Keine feste Appearance setzen -> folgt automatisch dem System
+        // (Hell/Dunkel), damit Hintergrund und Text (labelColor) zusammenpassen.
 
         let content = TabBarView(frame: NSRect(origin: .zero, size: rect.size), wins: wins, active: active)
         panel.contentView = content
@@ -59,10 +61,15 @@ private final class TabBarView: NSView {
         self.wins = wins
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.94).cgColor
+        // Systemfarbe statt hartkodiertem Dunkel — sonst rendert der Text
+        // (labelColor, folgt dem System-Modus) im Hellmodus schwarz auf
+        // schwarzem Grund. windowBackgroundColor passt sich automatisch an.
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
         layer?.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]   // nur oben rund
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.cgColor
 
         let maxTabs = min(wins.count, 8)
         let tabW = min(220, (bounds.width - 8) / CGFloat(maxTabs))
@@ -70,9 +77,8 @@ private final class TabBarView: NSView {
             let btn = NSButton(frame: NSRect(x: 4 + CGFloat(i) * tabW, y: 3,
                                              width: tabW - 4, height: bounds.height - 6))
             btn.bezelStyle = .accessoryBarAction
-            btn.title = w.app + (w.title.isEmpty ? "" : " — \(w.title)")
+            btn.attributedTitle = Self.title(for: w, active: w.windowID == active)
             btn.lineBreakMode = .byTruncatingTail
-            btn.font = .systemFont(ofSize: 11, weight: w.windowID == active ? .semibold : .regular)
             if let icon = NSRunningApplication(processIdentifier: w.pid)?.icon {
                 icon.size = NSSize(width: 14, height: 14)
                 btn.image = icon
@@ -83,7 +89,7 @@ private final class TabBarView: NSView {
             btn.action = #selector(tabClicked(_:))
             if w.windowID == active {
                 btn.wantsLayer = true
-                btn.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+                btn.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
                 btn.layer?.cornerRadius = 6
             }
             addSubview(btn)
@@ -91,6 +97,18 @@ private final class TabBarView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // labelColor/secondaryLabelColor sind System-adaptiv (schwarz im Hell-,
+    // weiß im Dunkelmodus) — garantiert Kontrast statt sich auf die
+    // Standard-Bezel-Textfarbe zu verlassen, die für unseren eigenen
+    // Hintergrund nicht immer passt.
+    private static func title(for w: WinInfo, active: Bool) -> NSAttributedString {
+        let text = w.app + (w.title.isEmpty ? "" : " — \(w.title)")
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: active ? .semibold : .regular),
+            .foregroundColor: active ? NSColor.controlAccentColor : NSColor.labelColor,
+        ])
+    }
 
     @objc private func tabClicked(_ sender: NSButton) {
         guard sender.tag < wins.count else { return }
@@ -100,9 +118,9 @@ private final class TabBarView: NSView {
         for (i, view) in subviews.enumerated() {
             guard let b = view as? NSButton else { continue }
             let isActive = i == sender.tag
-            b.font = .systemFont(ofSize: 11, weight: isActive ? .semibold : .regular)
+            b.attributedTitle = Self.title(for: wins[i], active: isActive)
             b.layer?.backgroundColor = isActive
-                ? NSColor.white.withAlphaComponent(0.14).cgColor
+                ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
                 : NSColor.clear.cgColor
         }
     }
