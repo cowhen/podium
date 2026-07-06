@@ -41,6 +41,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         get { model.stage }
         set { model.stage = newValue }
     }
+    // Z-Order aller Fenster beim Öffnen — sortiert die Bühne stabil, auch für
+    // zugeordnete Fenster, die dort zusätzlich erscheinen.
+    private var zRank: [CGWindowID: Int] = [:]
     // Rand-/Eck-Drop erzwingt eine bestimmte Stapelrichtung (top/bottom vs.
     // links/rechts) unabhängig von der Monitor-Ausrichtung — siehe arrangeByZone.
     // Nil = Standard (Monitor-Ausrichtung, display.vertical).
@@ -101,6 +104,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         allWins = appWM.collectWindows(cfg: cfg)
         snapshot = allWins.map { ($0.ax, $0.bounds) }
         let rank = appWM.zOrderRank()
+        zRank = rank
         let sorted = appWM.perMonitorOrder(displays: ds, wins: allWins, rank: rank)
 
         // Pro Monitor die kaum überlappenden Vordergrund-Fenster in die Karte,
@@ -535,10 +539,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Bühne erst am 75%-Maximum layouten und messen, dann die Breite auf
         // den tatsächlichen Bedarf trimmen und ggf. enger neu umbrechen.
         let stageV = StageView(controller: self)
-        stageV.setWindows(stage, filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin)
+        stageV.setWindows(stageList(), filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin)
         innerWidth = min(availW, max(mapWidth, stageV.frame.width, 420))
         if innerWidth < availW {
-            stageV.setWindows(stage, filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin)
+            stageV.setWindows(stageList(), filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin)
         }
         stageMaxWidth = innerWidth
         stageView = stageV
@@ -934,15 +938,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     // MARK: Klicks
 
-    // Klick auf eine Bühnen-Kachel: Fenster nach vorn holen und Overlay
-    // schließen (Switcher-Verhalten). Klick auf eine Box-Kachel: ein Prinzip
-    // für alle Layouts — jeder Klick macht das angeklickte Fenster
-    // prominenter, ist es schon maximal, setzt der Klick auf ausgewogen
-    // zurück. Stufen: 1. eigene Seite groß (Hauptachse), 2. innerhalb der
-    // Seite groß (Querachse, nur 3er/2x2), 3. alles zurück auf 50/50.
-    func tileClicked(_ info: WinInfo) {
+    // Klick auf eine Bühnen-Kachel (fromStage) ODER ein Bühnen-Fenster in der
+    // Karte (Geist): Fenster nach vorn holen und Overlay schließen
+    // (Switcher-Verhalten). Klick auf eine echte Box-Kachel: ein Prinzip für
+    // alle Layouts — jeder Klick macht das angeklickte Fenster prominenter,
+    // ist es schon maximal, setzt der Klick auf ausgewogen zurück. Stufen:
+    // 1. eigene Seite groß (Hauptachse), 2. innerhalb der Seite groß
+    // (Querachse, nur 3er/2x2), 3. alles zurück auf 50/50.
+    func tileClicked(_ info: WinInfo, fromStage: Bool = false) {
         selectedID = info.windowID   // Maus-Klick zieht auch den Tastatur-Ring mit
-        if stage.contains(where: { $0.windowID == info.windowID }) {
+        // Bühnen-Kachel schaltet immer zum Fenster — auch wenn dasselbe
+        // Fenster zusätzlich oben in der Karte zugeordnet ist. Nur ein Klick
+        // direkt auf die Box-Kachel eines zugeordneten Fensters cyclt das Ratio.
+        if fromStage || stage.contains(where: { $0.windowID == info.windowID }) {
             revive(info)
             axFocus(info.ax)
             close()
@@ -1169,17 +1177,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
             || w.title.localizedCaseInsensitiveContains(search)
     }
 
+    // Die Bühne zeigt IMMER alle Fenster — nicht zugeordnete UND zugeordnete
+    // (die zusätzlich oben in der Karte liegen). So ist die Liste vollständig
+    // und eindeutig, statt dass manche Fenster nur oben, manche nur unten
+    // auftauchen. Z-sortiert für stabile App-Gruppierung; Duplikate über
+    // windowID ausgeschlossen (ein Fenster, das gleichzeitig in Stapel + Karte
+    // wäre, erscheint nur einmal).
+    private func stageList() -> [WinInfo] {
+        let assignedAll = displays.flatMap { assigned[$0.id] ?? [] }
+        let stacked = stacks.values.flatMap { $0.extras }   // in Tab-Stapeln versteckte
+        var seen = Set<CGWindowID>()
+        let combined = (assignedAll + stacked + stage).filter { seen.insert($0.windowID).inserted }
+        return combined.sorted { (zRank[$0.windowID] ?? .max) < (zRank[$1.windowID] ?? .max) }
+    }
+
     private func refreshStage() {
         guard let stageV = stageView else { return }
-        // Bei aktivem Filter wird die Bühne zur Treffer-Liste über ALLES:
-        // passende, bereits zugeordnete Fenster erscheinen zusätzlich als
-        // Duplikat (gleiche WinInfo — Ziffer/Drag/✕ wirken identisch), der
-        // Farbpunkt zeigt ihren Monitor.
-        var list = stage
-        if !search.isEmpty {
-            list += displays.flatMap { assigned[$0.id] ?? [] }.filter(matchesSearch)
-        }
-        stageV.setWindows(list, filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
+        stageV.setWindows(stageList(), filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
         // Geister-Kacheln folgen dem Bühnen-Inhalt (z. B. nach Zuordnen/Lösen).
         for d in displays {

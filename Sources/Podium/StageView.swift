@@ -126,7 +126,7 @@ final class StageView: NSView {
                 if tx > x, tx + tw > maxWidth { tx = x; ty += th + hgap }   // Umbruch innerhalb großer Gruppen
                 let t = WindowTileView(info: w, isVisible: false, controller: controller!,
                                        frame: NSRect(x: tx, y: ty, width: tw, height: th),
-                                       dot: dot(w), floating: floating(w))
+                                       dot: dot(w), floating: floating(w), isStageTile: true)
                 addSubview(t)
                 tiles.append(t)
                 tx += tw + hgap

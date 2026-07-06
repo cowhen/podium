@@ -17,14 +17,16 @@ final class WindowTileView: NSView {
     private var ghost: NSImageView?
 
     private let isGhost: Bool
+    let isStageTile: Bool   // Bühnen-Kachel (Switcher) vs. Box-Kachel (Anordnung)
 
     init(info: WinInfo, isVisible: Bool, controller: OverlayController, frame: NSRect,
          accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false,
-         isGhost: Bool = false) {
+         isGhost: Bool = false, isStageTile: Bool = false) {
         self.info = info
         self.isVisible = isVisible
         self.accent = accent
         self.isGhost = isGhost
+        self.isStageTile = isStageTile
         self.controller = controller
         super.init(frame: frame)
         wantsLayer = true
@@ -231,7 +233,7 @@ final class WindowTileView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         defer { dragStart = nil; ghost?.removeFromSuperview(); ghost = nil }
-        guard ghost != nil else { controller?.tileClicked(info); return }   // reiner Klick, kein Drag
+        guard ghost != nil else { controller?.tileClicked(info, fromStage: isStageTile); return }   // reiner Klick, kein Drag
         controller?.dragEnded(info, at: event.locationInWindow, option: event.modifierFlags.contains(.option))
     }
 }
