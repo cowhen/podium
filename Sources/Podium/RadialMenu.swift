@@ -57,10 +57,8 @@ final class RadialMenu: NSObject {
 
     private func show() {
         // Ziel VOR dem Anzeigen merken — unser Panel stiehlt gleich den Fokus.
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        guard let t = axCopy(axApp, kAXFocusedWindowAttribute as String) else { return }
-        target = (t as! AXUIElement)
+        guard let t = Self.pickTarget() else { return }
+        target = t
 
         let size = Self.radius * 2 + 20
         let mouse = NSEvent.mouseLocation
@@ -77,6 +75,29 @@ final class RadialMenu: NSObject {
         window = win
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // Fokussiertes Fenster der vordersten App; ist Podium selbst vorn (Aufruf
+    // übers Menü), stattdessen das oberste normale Fenster laut CGWindowList.
+    private static func pickTarget() -> AXUIElement? {
+        if let app = NSWorkspace.shared.frontmostApplication,
+           app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            let axApp = AXUIElementCreateApplication(app.processIdentifier)
+            if let t = axCopy(axApp, kAXFocusedWindowAttribute as String) { return (t as! AXUIElement) }
+            if let first = axWindows(of: app.processIdentifier).first { return first }
+        }
+        let cgList = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]]) ?? []
+        for e in cgList {
+            guard (e[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = e[kCGWindowOwnerPID as String] as? pid_t,
+                  NSRunningApplication(processIdentifier: pid)?.bundleIdentifier != Bundle.main.bundleIdentifier
+            else { continue }
+            let axApp = AXUIElementCreateApplication(pid)
+            if let t = axCopy(axApp, kAXFocusedWindowAttribute as String) { return (t as! AXUIElement) }
+            if let first = axWindows(of: pid).first { return first }
+        }
+        return nil
     }
 
     fileprivate func hide() {

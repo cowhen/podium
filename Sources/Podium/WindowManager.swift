@@ -9,9 +9,11 @@ struct WinInfo {
     let app: String
     let title: String
     let bounds: CGRect
+    var minimized: Bool = false
 
     func with(bounds: CGRect) -> WinInfo {
-        WinInfo(ax: ax, pid: pid, windowID: windowID, app: app, title: title, bounds: bounds)
+        WinInfo(ax: ax, pid: pid, windowID: windowID, app: app, title: title,
+                bounds: bounds, minimized: minimized)
     }
 }
 
@@ -26,6 +28,11 @@ final class WindowManager {
     // Fenster auf anderen Spaces existieren für das Tool nicht.
     func collectWindows(cfg: AppConfig) -> [WinInfo] {
         let cgList = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]]) ?? []
+        // Vollständige Liste (inkl. Offscreen) für MINIMIERTE Fenster — die
+        // fehlen in der OnScreen-Liste, sollen aber auf der Bühne erscheinen,
+        // sonst verliert man sie nach dem Auto-Minimieren komplett.
+        let cgAll = (CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]) ?? []
         var out: [WinInfo] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && !app.isHidden {
@@ -59,6 +66,31 @@ final class WindowManager {
                 out.append(WinInfo(ax: w, pid: pid, windowID: wid, app: name, title: title, bounds: f))
                 axWins.remove(at: bestAX)
                 candidates.remove(at: bestCand)
+            }
+
+            // Zweiter Durchgang: minimierte Fenster (AX kennt sie weiter und
+            // liefert den letzten Frame; Match gegen die Offscreen-Liste).
+            let usedIDs = Set(out.filter { $0.pid == pid }.map { $0.windowID })
+            var candidatesAll = cgAll.filter {
+                ($0[kCGWindowOwnerPID as String] as? pid_t) == pid
+                    && !usedIDs.contains(($0[kCGWindowNumber as String] as? CGWindowID) ?? 0)
+            }
+            for w in axWindows(of: pid) where axBool(w, kAXMinimizedAttribute as String) {
+                guard axString(w, kAXSubroleAttribute as String) == (kAXStandardWindowSubrole as String) else { continue }
+                let title = axString(w, kAXTitleAttribute as String) ?? ""
+                if cfg.ignoreTitlePatterns.contains(where: { title.localizedCaseInsensitiveContains($0) }) { continue }
+                guard let f = axFrame(w) else { continue }
+                var bestCand = -1
+                var bestDist = CGFloat.greatestFiniteMagnitude
+                for j in candidatesAll.indices {
+                    guard let dd = boundsDistance(candidatesAll[j][kCGWindowBounds as String], f) else { continue }
+                    if dd < bestDist { bestDist = dd; bestCand = j }
+                }
+                guard bestCand >= 0, bestDist < Tuning.axMatchMaxDistance,
+                      let wid = candidatesAll[bestCand][kCGWindowNumber as String] as? CGWindowID else { continue }
+                out.append(WinInfo(ax: w, pid: pid, windowID: wid, app: name, title: title,
+                                   bounds: f, minimized: true))
+                candidatesAll.remove(at: bestCand)
             }
         }
         return out

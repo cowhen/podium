@@ -40,11 +40,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Onboarding.showIfNeeded()
     }
 
-    // Radial-Menü-Hotkey (⌃⌥Space) je nach Einstellung an/ab.
+    // Radial-Menü-Hotkey (konfigurierbar, Default ⌃⌥Space) je nach Einstellung
+    // an/ab. Achtung: ⌃⌥Space kann von der Eingabequellen-Umschaltung belegt
+    // sein — dann in den Einstellungen umlegen.
     private func applyRadial() {
         if SettingsStore.shared.radialMenu {
-            HotKeyCenter.shared.register(id: 30, keyCode: UInt32(kVK_Space),
-                                         mods: UInt32(controlKey | optionKey)) {
+            let st = SettingsStore.shared
+            HotKeyCenter.shared.register(id: 30, keyCode: st.radialKeyCode, mods: st.radialMods) {
                 RadialMenu.shared.toggle()
             }
         } else {
@@ -94,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Layout für dieses Setup speichern", action: #selector(saveLayout), keyEquivalent: "s"))
         menu.addItem(NSMenuItem(title: "Gespeichertes Layout anwenden", action: #selector(applyLayout), keyEquivalent: "l"))
+        menu.addItem(NSMenuItem(title: "Radial-Menü öffnen", action: #selector(openRadial), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Einstellungen…", action: #selector(openSettings), keyEquivalent: ","))
         loginItem = NSMenuItem(title: "Bei Anmeldung starten", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -124,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func relayoutNow() { OverlayController.shared.toggle() }
     @objc private func restoreNow() { RestoreCenter.shared.restoreNow() }
     @objc private func saveLayout() { LayoutPresetStore.shared.saveCurrent() }
+    @objc private func openRadial() { RadialMenu.shared.toggle() }
     @objc private func applyLayout() {
         guard let p = LayoutPresetStore.shared.preset(for: displaySetFingerprint()) else { return }
         LayoutPresetStore.shared.apply(p)

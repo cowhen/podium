@@ -108,8 +108,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         var restAll: [WinInfo] = []
         for d in ds {
             let laned = sorted[d.id] ?? []
-            let tileable = laned.filter { !cfg.isFloating(pid: $0.pid, name: $0.app) }
-            let floating = laned.filter { cfg.isFloating(pid: $0.pid, name: $0.app) }
+            let tileable = laned.filter { !cfg.isFloating(pid: $0.pid, name: $0.app) && !$0.minimized }
+            let floating = laned.filter { cfg.isFloating(pid: $0.pid, name: $0.app) || $0.minimized }
             let (front, rest) = appWM.selectForeground(tileable)
             // Slots nach realer Bildschirmposition besetzen (links = Slot 0
             // usw.), nicht nach Z-Order — sonst zeigt die Box die Fenster
@@ -141,7 +141,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Option: Hintergrund-Fenster (Bühne, nicht floatend) beim Schließen
         // minimieren — die Karte zeigt dann nur noch, was wirklich sichtbar ist.
         if SettingsStore.shared.autoMinimize {
-            for w in stage where !isFloatingWin(w) {
+            for w in stage where !isFloatingWin(w) && !w.minimized {
                 axSetMinimized(w.ax, true)
             }
         }
@@ -390,6 +390,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // (relevant fürs Greifen — floatende Fenster lassen sich nicht greifen).
     @discardableResult
     private func place(_ info: WinInfo, onto id: CGDirectDisplayID) -> Bool {
+        revive(info)
         guard !cfg.isFloating(pid: info.pid, name: info.app) else {
             floatPlace(info, onto: id)
             return false
@@ -657,6 +658,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
         cfg.isFloating(pid: w.pid, name: w.app)
     }
 
+    // Minimierte Fenster vor jeder Aktion zurückholen.
+    private func revive(_ info: WinInfo) {
+        guard info.minimized else { return }
+        axSetMinimized(info.ax, false)
+    }
+
     // Bühnen-Fenster, die real auf diesem Monitor liegen — als Geister-Kacheln
     // in der Box, damit die Karte den vollständigen Ist-Zustand zeigt.
     private func ghostWins(for id: CGDirectDisplayID) -> [WinInfo] {
@@ -819,6 +826,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func dropOnBox(_ info: WinInfo, onto id: CGDirectDisplayID, at p: NSPoint, option: Bool = false) {
+        revive(info)
         guard !cfg.isFloating(pid: info.pid, name: info.app) else {
             floatPlace(info, onto: id)
             return
@@ -870,6 +878,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     func tileClicked(_ info: WinInfo) {
         selectedID = info.windowID   // Maus-Klick zieht auch den Tastatur-Ring mit
         if stage.contains(where: { $0.windowID == info.windowID }) {
+            revive(info)
             axFocus(info.ax)
             close()
             return
@@ -926,6 +935,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Raster-Fenster; alle Stapel-Mitglieder teilen sich dessen Fläche unter
     // einer Tab-Leiste.
     private func stackAdd(_ info: WinInfo, onto id: CGDirectDisplayID, slot: Int) {
+        revive(info)
         removeEverywhere(info)
         var st = stacks[id] ?? TabStack(slot: slot, extras: [])
         st.slot = slot
@@ -964,8 +974,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         refreshStage()
     }
 
-    // Rechtsklick auf eine Monitor-Box: Modus wählen.
-    func showModeMenu(for id: CGDirectDisplayID, event: NSEvent, in view: NSView) {
+    // Rechtsklick auf eine Monitor-Box (oder eine Kachel darin): Modus wählen.
+    func modeMenu(for id: CGDirectDisplayID) -> NSMenu {
         let menu = NSMenu()
         let tabbed = stacks[id] != nil
         let t = NSMenuItem(title: "Tab-Modus (alle Fenster stapeln)", action: #selector(menuEnableTabs(_:)), keyEquivalent: "")
@@ -978,7 +988,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         sp.representedObject = NSNumber(value: id)
         sp.state = tabbed ? .off : .on
         menu.addItem(sp)
-        NSMenu.popUpContextMenu(menu, with: event, for: view)
+        return menu
     }
 
     @objc private func menuEnableTabs(_ sender: NSMenuItem) {

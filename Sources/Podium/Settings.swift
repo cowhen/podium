@@ -41,6 +41,25 @@ final class SettingsStore {
         NotificationCenter.default.post(name: Self.changed, object: nil)
     }
 
+    // MARK: Radial-Menü-Kurzbefehl (Default ⌃⌥Space)
+
+    var radialKeyCode: UInt32 {
+        d.object(forKey: "radialKeyCode").flatMap { ($0 as? Int).map(UInt32.init) } ?? UInt32(kVK_Space)
+    }
+    var radialMods: UInt32 {
+        d.object(forKey: "radialMods").flatMap { ($0 as? Int).map(UInt32.init) } ?? UInt32(controlKey | optionKey)
+    }
+    var radialLabel: String {
+        d.string(forKey: "radialLabel") ?? "⌃⌥Space"
+    }
+
+    func setRadialHotkey(keyCode: UInt32, mods: UInt32, label: String) {
+        d.set(Int(keyCode), forKey: "radialKeyCode")
+        d.set(Int(mods), forKey: "radialMods")
+        d.set(label, forKey: "radialLabel")
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+    }
+
     // MARK: Feature-Schalter
 
     // Bool-Optionen mit explizitem Default (UserDefaults.bool wäre immer false).
@@ -113,10 +132,14 @@ final class SettingsStore {
 // Escape bricht ab; mindestens ein Modifier (⌘/⌥/⌃) ist Pflicht, damit keine
 // blanken Buchstaben global verschluckt werden.
 final class ShortcutRecorderButton: NSButton {
+    enum Kind { case overlay, radial }
     private var monitor: Any?
+    private var kind: Kind = .overlay
 
-    convenience init() {
-        self.init(title: SettingsStore.shared.hotkeyLabel, target: nil, action: nil)
+    convenience init(kind: Kind = .overlay) {
+        let label = kind == .overlay ? SettingsStore.shared.hotkeyLabel : SettingsStore.shared.radialLabel
+        self.init(title: label, target: nil, action: nil)
+        self.kind = kind
         target = self
         action = #selector(beginRecording)
         bezelStyle = .rounded
@@ -135,7 +158,7 @@ final class ShortcutRecorderButton: NSButton {
     private func endRecording() {
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
-        title = SettingsStore.shared.hotkeyLabel
+        title = kind == .overlay ? SettingsStore.shared.hotkeyLabel : SettingsStore.shared.radialLabel
     }
 
     private func handle(_ event: NSEvent) {
@@ -148,7 +171,12 @@ final class ShortcutRecorderButton: NSButton {
         if event.modifierFlags.contains(.command) { mods |= UInt32(cmdKey); symbols += "⌘" }
         guard mods & ~UInt32(shiftKey) != 0 else { title = "⌘/⌥/⌃ nötig…"; return }
         let label = symbols + Self.keyName(event)
-        SettingsStore.shared.setHotkey(keyCode: UInt32(event.keyCode), mods: mods, label: label)
+        switch kind {
+        case .overlay:
+            SettingsStore.shared.setHotkey(keyCode: UInt32(event.keyCode), mods: mods, label: label)
+        case .radial:
+            SettingsStore.shared.setRadialHotkey(keyCode: UInt32(event.keyCode), mods: mods, label: label)
+        }
         endRecording()
     }
 
@@ -231,13 +259,11 @@ final class SettingsWindowController: NSWindowController {
             b.tag = i
             b.isBordered = false
             b.alignment = .left
-            b.font = .systemFont(ofSize: 13)
-            b.contentTintColor = .labelColor
             b.wantsLayer = true
             b.layer?.cornerRadius = 6
             b.translatesAutoresizingMaskIntoConstraints = false
-            b.widthAnchor.constraint(equalToConstant: 150).isActive = true
-            b.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            b.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 28).isActive = true
             sidebar.addArrangedSubview(b)
             sidebarButtons.append(b)
         }
@@ -256,7 +282,7 @@ final class SettingsWindowController: NSWindowController {
             sidebarWrap.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebarWrap.topAnchor.constraint(equalTo: root.topAnchor),
             sidebarWrap.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebarWrap.widthAnchor.constraint(equalToConstant: 170),
+            sidebarWrap.widthAnchor.constraint(equalToConstant: 184),
             sidebar.leadingAnchor.constraint(equalTo: sidebarWrap.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: sidebarWrap.topAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: sidebarWrap.trailingAnchor),
@@ -275,11 +301,20 @@ final class SettingsWindowController: NSWindowController {
     @objc private func sidebarClicked(_ sender: NSButton) { selectPane(sender.tag) }
 
     private func selectPane(_ index: Int) {
+        let sections = ["Allgemein", "Darstellung", "Apps", "Tastatur", "Layouts"]
         for (i, b) in sidebarButtons.enumerated() {
             b.layer?.backgroundColor = i == index
                 ? NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
                 : NSColor.clear.cgColor
-            b.contentTintColor = i == index ? .white : .labelColor
+            // Einzug + Farbe über attributedTitle — contentTintColor greift
+            // bei Borderless-Buttons mit Alignment nicht zuverlässig.
+            let para = NSMutableParagraphStyle()
+            para.firstLineHeadIndent = 10
+            b.attributedTitle = NSAttributedString(string: sections[i], attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: i == index ? .medium : .regular),
+                .foregroundColor: i == index ? NSColor.white : NSColor.labelColor,
+                .paragraphStyle: para,
+            ])
         }
         contentContainer.subviews.forEach { $0.removeFromSuperview() }
         let pane: NSView
@@ -325,10 +360,14 @@ final class SettingsWindowController: NSWindowController {
 
     private func paneAllgemein() -> NSView {
         let st = stack()
-        st.addArrangedSubview(sectionHeader("Kurzbefehl"))
-        let row = NSStackView(views: [label("Overlay ein-/ausblenden:"), ShortcutRecorderButton()])
+        st.addArrangedSubview(sectionHeader("Kurzbefehle"))
+        let row = NSStackView(views: [label("Overlay ein-/ausblenden:"), ShortcutRecorderButton(kind: .overlay)])
         row.spacing = 10
         st.addArrangedSubview(row)
+        let radialRow = NSStackView(views: [label("Radial-Menü:"), ShortcutRecorderButton(kind: .radial)])
+        radialRow.spacing = 10
+        st.addArrangedSubview(radialRow)
+        st.addArrangedSubview(hintLabel("Feste Direkt-Hotkeys: ⌃⌥←→ Hälften · ⌃⌥↑ maximieren · ⌃⌥↓ zentrieren · ⌃⌥1–4 Monitor N."))
         st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Verhalten"))
         st.addArrangedSubview(toggleRow("Hintergrund-Fenster beim Schließen minimieren",

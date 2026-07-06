@@ -67,6 +67,17 @@ final class WindowTileView: NSView {
             addSubview(d)
         }
 
+        if info.minimized {
+            // Minimiert-Kennzeichen: Fenster liegt im Dock, Klick holt es zurück.
+            let m = NSImageView(frame: NSRect(x: bounds.width - 42, y: bounds.height - 21, width: 15, height: 15))
+            let mcfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            m.image = NSImage(systemSymbolName: "arrow.down.app.fill", accessibilityDescription: "Minimiert")?
+                .withSymbolConfiguration(mcfg)
+            m.contentTintColor = NSColor.systemYellow.withAlphaComponent(0.8)
+            m.toolTip = "Minimiert — Klick oder Ablegen holt das Fenster zurück"
+            addSubview(m)
+        }
+
         if floating {
             // Floatende Apps verhalten sich fundamental anders (kein Kacheln,
             // kein Greifen) — das muss man der Kachel ansehen.
