@@ -30,11 +30,10 @@ enum BentoApply {
         LinkedEdges.shared.suppress()
         for (ax, slot) in placed { axSetFrame(ax, frames[slot]) }
         axRaise(dragged)
-        // Verbundene Ränder registrieren — in Slot-Reihenfolge. Sind Slots
-        // lückig (nur 1 Fenster), bricht track() bei count < 2 ohnehin ab.
+        // Verbundene Ränder anmelden — welche Fenster gerade wirklich
+        // aneinandergrenzen, bestimmt LinkedEdges bei jedem Resize neu.
         let ordered = placed.sorted { $0.slot < $1.slot }.map { $0.ax }
-        LinkedEdges.shared.track(displayID: d.id, display: d, wins: ordered,
-                                 mainR: 0.5, crossR: 0.5, vertical: vertical)
+        LinkedEdges.shared.track(ordered)
         return ordered
     }
 }

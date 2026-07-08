@@ -13,20 +13,16 @@ final class WindowTileView: NSView {
     private let imageView = NSImageView()
     private let appLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
-    private var dragStart: NSPoint?
-    private var ghost: NSImageView?
 
     private let isGhost: Bool
-    let isStageTile: Bool   // Bühnen-Kachel (Switcher) vs. Box-Kachel (Anordnung)
 
     init(info: WinInfo, isVisible: Bool, controller: OverlayController, frame: NSRect,
          accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false,
-         isGhost: Bool = false, isStageTile: Bool = false) {
+         isGhost: Bool = false) {
         self.info = info
         self.isVisible = isVisible
         self.accent = accent
         self.isGhost = isGhost
-        self.isStageTile = isStageTile
         self.controller = controller
         super.init(frame: frame)
         wantsLayer = true
@@ -114,13 +110,11 @@ final class WindowTileView: NSView {
     @objc private func closeTapped() { controller?.closeRequested(info) }
 
     private var kbSelected = false
-    private var kbGrabbed = false
     private var dimmed = false
 
-    // Tastatur-Auswahl: weißer Ring; im Greifen-Modus orange.
-    func setKeyboardSelection(_ on: Bool, grabbed: Bool) {
+    // Tastatur-Auswahl: weißer Ring.
+    func setKeyboardSelection(_ on: Bool) {
         kbSelected = on
-        kbGrabbed = grabbed
         applyHighlight()
     }
 
@@ -143,21 +137,10 @@ final class WindowTileView: NSView {
         alphaValue = isGhost ? 0.45 : (isVisible ? 1.0 : 0.75)
         if kbSelected {
             layer?.borderWidth = 3
-            layer?.borderColor = (kbGrabbed ? NSColor.systemOrange : NSColor.white).cgColor
+            layer?.borderColor = NSColor.white.cgColor
             alphaValue = 1.0
         }
         if dimmed && !kbSelected { alphaValue = 0.3 }
-    }
-
-    // Markiert die Kachel während eines Drags als Ersetzungs-/Tausch-Ziel.
-    func setDropCandidate(_ on: Bool) {
-        if on {
-            layer?.borderWidth = 2.5
-            layer?.borderColor = NSColor.systemYellow.cgColor
-            alphaValue = 1.0
-        } else {
-            applyHighlight()
-        }
     }
 
     private func loadThumbnail() {
@@ -196,44 +179,33 @@ final class WindowTileView: NSView {
     override func mouseEntered(with event: NSEvent) { controller?.tileHoverBegan(self) }
     override func mouseExited(with event: NSEvent) { controller?.tileHoverEnded(self) }
 
-    // Rechtsklick: Modus-Menü der Box, der diese Kachel zugeordnet ist
-    // (nil auf der Bühne — kein Menü dort). Direkt hier statt auf die
-    // Responder-Chain zu vertrauen, da Kacheln fast die ganze Box ausfüllen
-    // und damit fast immer den Rechtsklick zuerst abbekommen.
+    // Rechtsklick: Aktionsmenü (fokussieren/minimieren/ausblenden/schließen/
+    // App beenden) — direkt hier statt über die Responder-Chain, da Kacheln
+    // den Rechtsklick zuerst abbekommen.
     override func menu(for event: NSEvent) -> NSMenu? {
-        controller?.modeMenu(forTileOwning: info)
+        controller?.tileMenu(for: info)
     }
 
-    // MARK: Drag
+    // MARK: Klick
 
-    override func mouseDown(with event: NSEvent) { dragStart = event.locationInWindow }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let start = dragStart, let win = window, let root = win.contentView else { return }
-        let p = event.locationInWindow
-        if ghost == nil, hypot(p.x - start.x, p.y - start.y) > 4 {
-            controller?.dragBegan()
-            let g = NSImageView(frame: NSRect(origin: .zero, size: NSSize(width: bounds.width * 1.05, height: bounds.height * 1.05)))
-            g.image = imageView.image
-            g.alphaValue = 0.9
-            g.wantsLayer = true
-            g.layer?.cornerRadius = 8
-            g.layer?.cornerCurve = .continuous
-            g.layer?.shadowOpacity = 0.4
-            g.layer?.shadowRadius = 12
-            g.layer?.shadowOffset = CGSize(width: 0, height: -6)
-            root.addSubview(g)
-            ghost = g
-        }
-        // root ist oben-links geflippt; locationInWindow ist immer unten-links -> umrechnen.
-        let local = root.convert(p, from: nil)
-        ghost?.frame.origin = NSPoint(x: local.x - (ghost?.frame.width ?? 0) / 2, y: local.y - (ghost?.frame.height ?? 0) / 2)
-        controller?.dragHover(info, at: p)
-    }
+    // Einzelklick verzögert ausführen: ein Doppelklick liefert ERST ein
+    // clickCount==1-Event — würde das sofort feuern, wäre der Doppelklick-
+    // Pfad unerreichbar (und der zweite Klick träfe schon den Loop-Catcher).
+    private var pendingClick: DispatchWorkItem?
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; ghost?.removeFromSuperview(); ghost = nil }
-        guard ghost != nil else { controller?.tileClicked(info, fromStage: isStageTile); return }   // reiner Klick, kein Drag
-        controller?.dragEnded(info, at: event.locationInWindow, option: event.modifierFlags.contains(.option))
+        if event.clickCount >= 2 {
+            pendingClick?.cancel()
+            pendingClick = nil
+            controller?.tileDoubleClicked(info)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingClick = nil
+            self.controller?.tileClicked(self.info)
+        }
+        pendingClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
     }
 }

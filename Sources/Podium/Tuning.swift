@@ -22,6 +22,10 @@ enum Tuning {
     // Hover-Zoom: Verzögerung bis zur großen Vorschau und deren Größe.
     static let hoverPreviewDelay: Double = 0.35
     static let previewSize = CGSize(width: 360, height: 280)
+    // Loop-Modus: "fast maximieren" lässt diesen Anteil als Rand stehen.
+    static let almostMaximizeRatio: CGFloat = 0.9
+    // Loop-Modus: sichtbarer Streifen eines gestashten Fensters am Bildschirmrand.
+    static let stashSliver: CGFloat = 6
 }
 
 // Überlappungsanteil relativ zur kleineren der beiden Flächen — so zählt ein

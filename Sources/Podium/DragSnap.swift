@@ -24,12 +24,17 @@ final class DragSnapManager {
     private var draggedMonitor: Any?
     private var upMonitor: Any?
 
+    private var mouseIsDown = false
     private var candidate: AXUIElement?
     private var candidatePid: pid_t = 0
     private var originalFrame: CGRect?
     private var isDragging = false
     private var activeZone: BentoZone?
     private var previewWindows: [NSWindow] = []
+    // Pro Drag einmal geladen (AppConfig.load() + volle Fensterenumeration
+    // sind zu teuer, um sie bei jedem Zonenwechsel mitten im Drag zu wiederholen).
+    private var dragCfg: AppConfig?
+    private var dragOthers: [WinInfo]?
 
     func start() {
         guard downMonitor == nil else { return }
@@ -45,11 +50,19 @@ final class DragSnapManager {
     }
 
     private func handleDown() {
+        // Kandidat NICHT hier auflösen: beim Klick-Drag auf ein Hintergrund-
+        // Fenster ist frontmostApplication zu diesem Zeitpunkt noch die ALTE
+        // App — der erste Drag-Gestus würde das falsche Fenster fangen und
+        // deshalb still nichts tun. Beim ersten Dragged-Event ist die
+        // Aktivierung durch.
+        mouseIsDown = true
         candidate = nil
         originalFrame = nil
         isDragging = false
-        guard SettingsStore.shared.dragSnap,
-              let app = NSWorkspace.shared.frontmostApplication,
+    }
+
+    private func resolveCandidate() {
+        guard let app = NSWorkspace.shared.frontmostApplication,
               app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
         guard let w = axCopy(axApp, kAXFocusedWindowAttribute as String) else { return }
@@ -61,8 +74,12 @@ final class DragSnapManager {
     }
 
     private func handleDragged() {
-        guard SettingsStore.shared.dragSnap, let c = candidate, let orig = originalFrame,
-              let cur = axFrame(c) else { return }
+        guard SettingsStore.shared.dragSnap, mouseIsDown else { return }
+        if candidate == nil {
+            resolveCandidate()
+            guard candidate != nil else { mouseIsDown = false; return }   // kein Ziel — Rest des Drags ignorieren
+        }
+        guard let c = candidate, let orig = originalFrame, let cur = axFrame(c) else { return }
         if !isDragging {
             // Erst als Verschieben werten, wenn sich die Position spürbar
             // geändert hat, die Größe aber gleich blieb (kein Resize-Drag).
@@ -73,10 +90,26 @@ final class DragSnapManager {
     }
 
     private func handleUp() {
-        defer { candidate = nil; originalFrame = nil; isDragging = false; hidePreview() }
+        defer {
+            mouseIsDown = false; candidate = nil; originalFrame = nil; isDragging = false
+            dragCfg = nil; dragOthers = nil
+            hidePreview()
+        }
         guard isDragging, let c = candidate, let zone = activeZone, let d = displayUnderMouse() else { return }
-        let others = appWM.otherWindows(on: d, excludingAX: c, pid: candidatePid, cfg: AppConfig.load())
+        let others = cachedOthers(on: d, excluding: c)
         BentoApply.apply(zone: zone, dragged: c, others: others.map { $0.ax }, display: d)
+    }
+
+    // "Andere" Fenster einmal pro Drag ermitteln (invalidiert bei Monitorwechsel).
+    private var dragOthersDisplayID: CGDirectDisplayID?
+    private func cachedOthers(on d: Display, excluding c: AXUIElement) -> [WinInfo] {
+        if let cached = dragOthers, dragOthersDisplayID == d.id { return cached }
+        let cfg = dragCfg ?? AppConfig.load()
+        dragCfg = cfg
+        let others = appWM.otherWindows(on: d, excludingAX: c, pid: candidatePid, cfg: cfg)
+        dragOthers = others
+        dragOthersDisplayID = d.id
+        return others
     }
 
     // MARK: Zonen & Vorschau
@@ -102,7 +135,7 @@ final class DragSnapManager {
         }
         guard z != activeZone else { return }
         activeZone = z
-        let others = appWM.otherWindows(on: d, excludingAX: candidate!, pid: candidatePid, cfg: AppConfig.load())
+        let others = cachedOthers(on: d, excluding: candidate!)
         let plan = BentoLayout.plan(zone: z, othersAvailable: others.count)
         guard let draggedIdx = plan.tokens.firstIndex(of: .dragged) else { hidePreview(); return }
         let frames = Layout.frames(visible: d.visible, vertical: plan.vertical ?? d.vertical, count: plan.tokens.count, split: 0)

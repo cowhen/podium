@@ -23,6 +23,25 @@ final class AXObserverCenter {
     private var subs: [Token: Subscription] = [:]
     private var nextID: UInt64 = 1
 
+    // Beendet sich eine beobachtete App, feuern deren Fenster nicht immer
+    // saubere Destroy-Notifications — Observer + RunLoop-Source + Subs würden
+    // für immer liegenbleiben (Leak über die Lebenszeit der Menüleisten-App).
+    private init() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.cleanUp(pid: app.processIdentifier)
+        }
+    }
+
+    private func cleanUp(pid: pid_t) {
+        if let obs = observers.removeValue(forKey: pid) {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+        }
+        subs = subs.filter { $0.value.pid != pid }
+    }
+
     // Abonniert eine Notification auf einem Element. Handler läuft auf dem
     // Main-Thread. Rückgabe nil, wenn der Observer nicht erzeugt werden kann
     // (App weg, keine Berechtigung).

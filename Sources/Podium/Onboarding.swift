@@ -41,8 +41,8 @@ enum Onboarding {
             content.addArrangedSubview(b)
         }
 
-        para("⌥⇥ öffnet das Overlay",
-             "Oben die Karte deiner Monitore mit den Vordergrund-Fenstern, unten die Bühne mit allem anderen. Ziehen ordnet zu, Tippen filtert, Ziffern werfen aufs Ziel — jede Aktion wirkt sofort, Escape rollt alles zurück.")
+        para("⌥⇥ öffnet die Bühne",
+             "Alle Fenster an einer Stelle, gruppiert nach App. Tippen filtert, Pfeiltasten wählen — das aktive Fenster ist schon ausgewählt. ↵ oder Klick öffnet den Loop-Modus (per Maus oder Tastatur positionieren, ↵/Klick wendet an); ⌘↵ oder Doppelklick wechselt nur zum Fenster. In den Einstellungen lässt sich das umdrehen (↵ wechselt, Leertaste positioniert). Escape rollt alles zurück.")
         para("Zwei Berechtigungen nötig",
              "Bedienungshilfen (Fenster bewegen) und Bildschirmaufnahme (Vorschaubilder). Beide unter Systemeinstellungen → Datenschutz & Sicherheit freigeben — PODIUM fragt beim ersten Start automatisch.")
         para("Direkt-Hotkeys ohne Overlay",

@@ -1,17 +1,12 @@
 import AppKit
 
-// Ziehbarer Gruppenkopf einer App auf der Bühne: Icon + Name + Anzahl.
-// Drag auf eine Monitor-Box legt die ersten zwei Fenster der App als Split.
+// Gruppenkopf einer App auf der Bühne: Icon + Name + Anzahl.
 final class GroupHeaderView: NSView {
     let app: String
-    weak var controller: OverlayController?
-    private var dragStart: NSPoint?
-    private var ghost: NSImageView?
     private let icon = NSImageView()
 
-    init(app: String, pid: pid_t, count: Int, controller: OverlayController) {
+    init(app: String, pid: pid_t, count: Int) {
         self.app = app
-        self.controller = controller
         super.init(frame: NSRect(x: 0, y: 0, width: 10, height: 22))
 
         icon.image = appIcon(for: pid)
@@ -33,34 +28,9 @@ final class GroupHeaderView: NSView {
         addSubview(countLabel)
 
         frame.size.width = countLabel.frame.maxX
-        toolTip = "Ziehen legt die ersten zwei \(app)-Fenster als Split auf einen Monitor"
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    override func mouseDown(with event: NSEvent) { dragStart = event.locationInWindow }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let start = dragStart, let root = window?.contentView else { return }
-        let p = event.locationInWindow
-        if ghost == nil, hypot(p.x - start.x, p.y - start.y) > 4 {
-            controller?.dragBegan()
-            let g = NSImageView(frame: NSRect(origin: .zero, size: NSSize(width: 40, height: 40)))
-            g.image = icon.image
-            g.alphaValue = 0.9
-            root.addSubview(g)
-            ghost = g
-        }
-        let local = root.convert(p, from: nil)
-        ghost?.frame.origin = NSPoint(x: local.x - 20, y: local.y - 20)
-        controller?.groupDragHover(at: p)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; ghost?.removeFromSuperview(); ghost = nil }
-        guard ghost != nil else { return }
-        controller?.groupDragEnded(app, at: event.locationInWindow)
-    }
 }
 
 // Die Bühne: ALLE nicht zugeordneten Fenster in einer Fläche, gruppiert nach
@@ -87,8 +57,12 @@ final class StageView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    // Gruppiert nach App (Reihenfolge des ersten Auftretens = Z-Order), Flow-
-    // Layout mit Umbruch bei maxWidth. filter matcht App-Name oder Titel.
+    // Gruppiert nach App (Reihenfolge des ersten Auftretens = Z-Order, per
+    // Einstellung abschaltbar — dann eine flache, nur nach Z-Order sortierte
+    // Gruppe ohne Kopfzeile), Flow-Layout mit Umbruch bei maxWidth. filter
+    // matcht App-Name oder Titel. Kachelgröße kommt aus den Einstellungen —
+    // größere Kacheln lassen weniger pro Zeile zu, die Bühne wächst dadurch
+    // automatisch mehrzeilig (dasselbe Umbruch-Verhalten wie eh schon).
     func setWindows(_ wins: [WinInfo], filter: String, maxWidth: CGFloat,
                     dot: (WinInfo) -> NSColor?, floating: (WinInfo) -> Bool = { _ in false }) {
         tiles.forEach { $0.removeFromSuperview() }
@@ -99,34 +73,46 @@ final class StageView: NSView {
             $0.app.localizedCaseInsensitiveContains(filter) || $0.title.localizedCaseInsensitiveContains(filter)
         }
 
-        var order: [String] = []
-        var byApp: [String: [WinInfo]] = [:]
-        for w in filtered {
-            if byApp[w.app] == nil { order.append(w.app) }
-            byApp[w.app, default: []].append(w)
+        var groups: [(app: String?, wins: [WinInfo])] = []
+        if SettingsStore.shared.stageGroupByApp {
+            var order: [String] = []
+            var byApp: [String: [WinInfo]] = [:]
+            for w in filtered {
+                if byApp[w.app] == nil { order.append(w.app) }
+                byApp[w.app, default: []].append(w)
+            }
+            groups = order.map { (app: $0, wins: byApp[$0]!) }
+        } else if !filtered.isEmpty {
+            groups = [(app: nil, wins: filtered)]
         }
 
-        let tw = Tuning.stageTileSize.width, th = Tuning.stageTileSize.height
+        // Auf die verfügbare Breite clampen — sonst ragt die erste Kachel
+        // einer Zeile bei sehr großer eingestellter Kachelbreite übers Overlay hinaus.
+        let tw = min(SettingsStore.shared.stageTileWidth, maxWidth)
+        let th = tw * (Tuning.stageTileSize.height / Tuning.stageTileSize.width)
         let hgap: CGFloat = 8, vgap: CGFloat = 18, groupGap: CGFloat = 28, headerH: CGFloat = 28
         var x: CGFloat = 0, y: CGFloat = 0, lineMaxY: CGFloat = 0, usedWidth: CGFloat = 0
 
-        for app in order {
-            let group = byApp[app]!
+        for (appName, group) in groups {
             let gw = CGFloat(group.count) * tw + CGFloat(group.count - 1) * hgap
             if x > 0, x + min(gw, maxWidth) > maxWidth { x = 0; y = lineMaxY + vgap }
 
-            let header = GroupHeaderView(app: app, pid: group[0].pid, count: group.count, controller: controller!)
-            header.frame.origin = NSPoint(x: x, y: y)
-            addSubview(header)
-            headers.append(header)
-            usedWidth = max(usedWidth, header.frame.maxX)
+            var ty = y
+            if let appName {
+                let header = GroupHeaderView(app: appName, pid: group[0].pid, count: group.count)
+                header.frame.origin = NSPoint(x: x, y: y)
+                addSubview(header)
+                headers.append(header)
+                usedWidth = max(usedWidth, header.frame.maxX)
+                ty = y + headerH
+            }
 
-            var tx = x, ty = y + headerH
+            var tx = x
             for w in group {
                 if tx > x, tx + tw > maxWidth { tx = x; ty += th + hgap }   // Umbruch innerhalb großer Gruppen
                 let t = WindowTileView(info: w, isVisible: false, controller: controller!,
                                        frame: NSRect(x: tx, y: ty, width: tw, height: th),
-                                       dot: dot(w), floating: floating(w), isStageTile: true)
+                                       dot: dot(w), floating: floating(w))
                 addSubview(t)
                 tiles.append(t)
                 tx += tw + hgap
@@ -150,13 +136,6 @@ final class StageView: NSView {
         // Frame auf die real genutzte Breite trimmen — der Aufrufer nutzt das,
         // um das Overlay nur so breit zu machen wie nötig.
         frame.size = NSSize(width: min(usedWidth, maxWidth), height: lineMaxY)
-    }
-
-    var hitAreaInWindow: NSRect { convert(bounds.insetBy(dx: -10, dy: -14), to: nil) }
-
-    // Hebt die Bühne während eines Drags als Drop-Ziel ("unzuordnen") hervor.
-    func setDropTarget(_ on: Bool) {
-        layer?.backgroundColor = (on ? NSColor.controlAccentColor.withAlphaComponent(0.08) : nil)?.cgColor
     }
 
     // Verhindert, dass Klicks auf freie Fläche zum Hintergrund hochbubbeln.

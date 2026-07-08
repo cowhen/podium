@@ -41,25 +41,6 @@ final class SettingsStore {
         NotificationCenter.default.post(name: Self.changed, object: nil)
     }
 
-    // MARK: Radial-Menü-Kurzbefehl (Default ⌃⌥Space)
-
-    var radialKeyCode: UInt32 {
-        d.object(forKey: "radialKeyCode").flatMap { ($0 as? Int).map(UInt32.init) } ?? UInt32(kVK_Space)
-    }
-    var radialMods: UInt32 {
-        d.object(forKey: "radialMods").flatMap { ($0 as? Int).map(UInt32.init) } ?? UInt32(controlKey | optionKey)
-    }
-    var radialLabel: String {
-        d.string(forKey: "radialLabel") ?? "⌃⌥Space"
-    }
-
-    func setRadialHotkey(keyCode: UInt32, mods: UInt32, label: String) {
-        d.set(Int(keyCode), forKey: "radialKeyCode")
-        d.set(Int(mods), forKey: "radialMods")
-        d.set(label, forKey: "radialLabel")
-        NotificationCenter.default.post(name: Self.changed, object: nil)
-    }
-
     // MARK: Feature-Schalter
 
     // Bool-Optionen mit explizitem Default (UserDefaults.bool wäre immer false).
@@ -77,11 +58,6 @@ final class SettingsStore {
         get { flag("autoMinimize", default: false) }
         set { setFlag("autoMinimize", newValue) }
     }
-    // Radial-Menü (⌃⌥Space) für Schnell-Snapping.
-    var radialMenu: Bool {
-        get { flag("radialMenu", default: true) }
-        set { setFlag("radialMenu", newValue) }
-    }
     // Verbundene Ränder: echtes Fenster-Resize zieht die Raster-Nachbarn mit.
     var linkedEdges: Bool {
         get { flag("linkedEdges", default: true) }
@@ -96,6 +72,70 @@ final class SettingsStore {
     var dragSnap: Bool {
         get { flag("dragSnap", default: true) }
         set { setFlag("dragSnap", newValue) }
+    }
+    // Loop-Modus: bei Hälften/Vierteln Nachbarfenster automatisch mit ins
+    // Bento-Raster ziehen (statt nur das eine ausgewählte Fenster zu bewegen).
+    var loopFillNeighbors: Bool {
+        get { flag("loopFillNeighbors", default: false) }
+        set { setFlag("loopFillNeighbors", newValue) }
+    }
+    // Bühne: Fenster nach App gruppieren (mit Gruppenkopf) statt als eine
+    // flache, nur nach Z-Order sortierte Liste.
+    var stageGroupByApp: Bool {
+        get { flag("stageGroupByApp", default: true) }
+        set { setFlag("stageGroupByApp", newValue) }
+    }
+    // Interaktionsmodell der Bühne: false = Enter/Klick öffnen den Loop-Modus
+    // (⌘↵/Doppelklick wechseln nur), true = Enter/Klick wechseln nur wie ein
+    // klassischer Switcher (Loop-Modus über Leertaste bzw. ⌘↵).
+    var stageEnterSwitches: Bool {
+        get { flag("stageEnterSwitches", default: false) }
+        set { setFlag("stageEnterSwitches", newValue) }
+    }
+
+    // MARK: Direkt-Hotkey-Bindings (Einstellungen → Hotkeys)
+
+    // Pro Aktion optional ein Binding; "cleared" markiert bewusst gelöschte
+    // Werks-Defaults (sonst kämen sie beim nächsten Start zurück).
+    func directBinding(for key: String) -> (keyCode: UInt32, mods: UInt32, label: String)? {
+        guard let dict = d.dictionary(forKey: "direct.\(key)"),
+              let code = dict["keyCode"] as? Int, let mods = dict["mods"] as? Int,
+              let label = dict["label"] as? String else { return nil }
+        return (UInt32(code), UInt32(mods), label)
+    }
+
+    func directBindingCleared(_ key: String) -> Bool {
+        (d.dictionary(forKey: "direct.\(key)")?["cleared"] as? Bool) ?? false
+    }
+
+    func setDirectBinding(for key: String, keyCode: UInt32, mods: UInt32, label: String) {
+        d.set(["keyCode": Int(keyCode), "mods": Int(mods), "label": label], forKey: "direct.\(key)")
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+    }
+
+    func clearDirectBinding(for key: String) {
+        d.set(["cleared": true], forKey: "direct.\(key)")
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+    }
+
+    // MARK: Zahlen-Optionen mit explizitem Default.
+
+    private func number(_ key: String, default def: CGFloat) -> CGFloat {
+        (d.object(forKey: key) as? Double).map { CGFloat($0) } ?? def
+    }
+
+    private func setNumber(_ key: String, _ v: CGFloat) {
+        d.set(Double(v), forKey: key)
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+    }
+
+    // Breite einer Bühnen-Kachel — Höhe folgt im festen Seitenverhältnis von
+    // Tuning.stageTileSize. Größere Kacheln lassen pro Zeile weniger Platz,
+    // die Bühne bricht dann automatisch mehrzeilig um (bestehende
+    // Flow-Layout-Logik in StageView, unverändert).
+    var stageTileWidth: CGFloat {
+        get { number("stageTileWidth", default: Tuning.stageTileSize.width) }
+        set { setNumber("stageTileWidth", newValue) }
     }
 
     // MARK: Monitor-Farben
@@ -137,19 +177,36 @@ final class SettingsStore {
 // Escape bricht ab; mindestens ein Modifier (⌘/⌥/⌃) ist Pflicht, damit keine
 // blanken Buchstaben global verschluckt werden.
 final class ShortcutRecorderButton: NSButton {
-    enum Kind { case overlay, radial }
     private var monitor: Any?
-    private var kind: Kind = .overlay
+    // Generalisiert: get liefert das aktuelle Label (nil = unbelegt), commit
+    // persistiert die neue Kombination. Default = Overlay-Hotkey.
+    private var getLabel: () -> String? = { SettingsStore.shared.hotkeyLabel }
+    private var commit: (UInt32, UInt32, String) -> Void = {
+        SettingsStore.shared.setHotkey(keyCode: $0, mods: $1, label: $2)
+    }
 
-    convenience init(kind: Kind = .overlay) {
-        let label = kind == .overlay ? SettingsStore.shared.hotkeyLabel : SettingsStore.shared.radialLabel
-        self.init(title: label, target: nil, action: nil)
-        self.kind = kind
+    convenience init() {
+        self.init(title: "", target: nil, action: nil)
+        finishSetup()
+    }
+
+    convenience init(getLabel: @escaping () -> String?,
+                     commit: @escaping (UInt32, UInt32, String) -> Void) {
+        self.init(title: "", target: nil, action: nil)
+        self.getLabel = getLabel
+        self.commit = commit
+        finishSetup()
+    }
+
+    private func finishSetup() {
+        title = getLabel() ?? "–"
         target = self
         action = #selector(beginRecording)
         bezelStyle = .rounded
         setContentHuggingPriority(.defaultLow, for: .horizontal)
     }
+
+    func refreshTitle() { title = getLabel() ?? "–" }
 
     @objc private func beginRecording() {
         guard monitor == nil else { return }
@@ -163,7 +220,7 @@ final class ShortcutRecorderButton: NSButton {
     private func endRecording() {
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
-        title = kind == .overlay ? SettingsStore.shared.hotkeyLabel : SettingsStore.shared.radialLabel
+        refreshTitle()
     }
 
     private func handle(_ event: NSEvent) {
@@ -176,12 +233,7 @@ final class ShortcutRecorderButton: NSButton {
         if event.modifierFlags.contains(.command) { mods |= UInt32(cmdKey); symbols += "⌘" }
         guard mods & ~UInt32(shiftKey) != 0 else { title = "⌘/⌥/⌃ nötig…"; return }
         let label = symbols + Self.keyName(event)
-        switch kind {
-        case .overlay:
-            SettingsStore.shared.setHotkey(keyCode: UInt32(event.keyCode), mods: mods, label: label)
-        case .radial:
-            SettingsStore.shared.setRadialHotkey(keyCode: UInt32(event.keyCode), mods: mods, label: label)
-        }
+        commit(UInt32(event.keyCode), mods, label)
         endRecording()
     }
 
@@ -258,7 +310,7 @@ final class SettingsWindowController: NSWindowController {
         sidebar.edgeInsets = NSEdgeInsets(top: 14, left: 10, bottom: 14, right: 10)
         sidebar.translatesAutoresizingMaskIntoConstraints = false
 
-        let sections = ["Allgemein", "Darstellung", "Apps", "Tastatur", "Layouts"]
+        let sections = ["Allgemein", "Hotkeys", "Darstellung", "Apps", "Tastatur", "Layouts"]
         for (i, name) in sections.enumerated() {
             let b = NSButton(title: name, target: self, action: #selector(sidebarClicked(_:)))
             b.tag = i
@@ -306,7 +358,7 @@ final class SettingsWindowController: NSWindowController {
     @objc private func sidebarClicked(_ sender: NSButton) { selectPane(sender.tag) }
 
     private func selectPane(_ index: Int) {
-        let sections = ["Allgemein", "Darstellung", "Apps", "Tastatur", "Layouts"]
+        let sections = ["Allgemein", "Hotkeys", "Darstellung", "Apps", "Tastatur", "Layouts"]
         for (i, b) in sidebarButtons.enumerated() {
             b.layer?.backgroundColor = i == index
                 ? NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
@@ -325,9 +377,10 @@ final class SettingsWindowController: NSWindowController {
         let pane: NSView
         switch index {
         case 0: pane = paneAllgemein()
-        case 1: pane = paneDarstellung()
-        case 2: pane = paneApps()
-        case 3: pane = paneTastatur()
+        case 1: pane = paneHotkeys()
+        case 2: pane = paneDarstellung()
+        case 3: pane = paneApps()
+        case 4: pane = paneTastatur()
         default: pane = paneLayouts()
         }
         pane.translatesAutoresizingMaskIntoConstraints = false
@@ -366,21 +419,18 @@ final class SettingsWindowController: NSWindowController {
     private func paneAllgemein() -> NSView {
         let st = stack()
         st.addArrangedSubview(sectionHeader("Kurzbefehle"))
-        let row = NSStackView(views: [label("Overlay ein-/ausblenden:"), ShortcutRecorderButton(kind: .overlay)])
+        let row = NSStackView(views: [label("Bühne ein-/ausblenden:"), ShortcutRecorderButton()])
         row.spacing = 10
         st.addArrangedSubview(row)
-        let radialRow = NSStackView(views: [label("Radial-Menü:"), ShortcutRecorderButton(kind: .radial)])
-        radialRow.spacing = 10
-        st.addArrangedSubview(radialRow)
-        st.addArrangedSubview(hintLabel("Feste Direkt-Hotkeys: ⌃⌥←→ Hälften · ⌃⌥↑ maximieren · ⌃⌥↓ zentrieren · ⌃⌥1–4 Monitor N."))
+        st.addArrangedSubview(hintLabel("Direkt-Hotkeys ohne Overlay (Hälften, Drittel, Ecken, Monitor-Wurf, …) sind unter „Hotkeys“ frei belegbar."))
         st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Verhalten"))
+        st.addArrangedSubview(toggleRow("Enter/Klick wechselt nur (Loop-Modus über Leertaste)",
+            "An: Enter/Klick fokussieren das Fenster und schließen (klassischer Switcher), die Leertaste öffnet den Loop-Modus. Aus: Enter/Klick öffnen den Loop-Modus, ⌘↵ oder Doppelklick wechseln nur.",
+            isOn: SettingsStore.shared.stageEnterSwitches, action: #selector(toggleEnterSwitches(_:))))
         st.addArrangedSubview(toggleRow("Hintergrund-Fenster beim Schließen minimieren",
             "Bühnen-Fenster wandern ins Dock, wenn das Overlay zugeht (floatende ausgenommen).",
             isOn: SettingsStore.shared.autoMinimize, action: #selector(toggleAutoMinimize(_:))))
-        st.addArrangedSubview(toggleRow("Radial-Menü (⌃⌥Space)",
-            "Kreis-Menü am Mauszeiger für Hälften, Viertel und Maximieren.",
-            isOn: SettingsStore.shared.radialMenu, action: #selector(toggleRadial(_:))))
         st.addArrangedSubview(toggleRow("Verbundene Ränder",
             "Zieht man am echten Rand eines gekachelten Fensters, folgen die Nachbarn.",
             isOn: SettingsStore.shared.linkedEdges, action: #selector(toggleLinked(_:))))
@@ -390,11 +440,82 @@ final class SettingsWindowController: NSWindowController {
         st.addArrangedSubview(toggleRow("Drag-to-Edge-Snap",
             "Ein Fenster an den Bildschirmrand ziehen füllt die halbe Fläche — zwei so gezogene Fenster ergeben einen Split.",
             isOn: SettingsStore.shared.dragSnap, action: #selector(toggleDragSnap(_:))))
+        st.addArrangedSubview(toggleRow("Loop-Modus kachelt mit Nachbarn",
+            "Bei jeder Rand-Aktion (Hälften, Drittel, Viertel-Streifen, Ecken) rutschen bis zu 3 andere Fenster auf demselben Monitor automatisch in die Restfläche. Zentrierte Aktionen (Zentrieren, Fast-Maximieren, Mitte-Hälfte/-Drittel, volle Höhe/Breite) bewegen immer nur das eine Fenster — dafür gibt es keinen sauberen Rest.",
+            isOn: SettingsStore.shared.loopFillNeighbors, action: #selector(toggleLoopFillNeighbors(_:))))
         return st
+    }
+
+    // Eine Zeile pro Direkt-Aktion: Name + Recorder + Löschen. Frei belegbar,
+    // die klassischen ⌃⌥-Kürzel sind Werks-Defaults.
+    private func paneHotkeys() -> NSView {
+        let st = stack()
+        st.addArrangedSubview(sectionHeader("Direkt-Hotkeys (ohne Overlay)"))
+        st.addArrangedSubview(hintLabel("Wirken sofort auf das fokussierte Fenster der vordersten App. Klick auf die Taste nimmt eine neue Kombination auf (Escape bricht ab), – löscht die Belegung."))
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 6
+        for action in DirectActions.actions {
+            let key = action.key
+            let name = label(action.name)
+            name.translatesAutoresizingMaskIntoConstraints = false
+            name.widthAnchor.constraint(equalToConstant: 190).isActive = true
+            let recorder = ShortcutRecorderButton(
+                getLabel: {
+                    if SettingsStore.shared.directBindingCleared(key) { return nil }
+                    return SettingsStore.shared.directBinding(for: key)?.label ?? action.defaultBinding?.label
+                },
+                commit: { code, mods, label in
+                    SettingsStore.shared.setDirectBinding(for: key, keyCode: code, mods: mods, label: label)
+                })
+            let clear = NSButton(title: "–", target: self, action: #selector(clearHotkeyClicked(_:)))
+            clear.identifier = NSUserInterfaceItemIdentifier(key)
+            let row = NSStackView(views: [name, recorder, clear])
+            row.spacing = 8
+            rows.addArrangedSubview(row)
+        }
+
+        let clip = NSScrollView()
+        clip.hasVerticalScroller = true
+        clip.drawsBackground = false
+        clip.translatesAutoresizingMaskIntoConstraints = false
+        clip.heightAnchor.constraint(equalToConstant: 380).isActive = true
+        clip.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        let flipped = FlippedView()
+        flipped.translatesAutoresizingMaskIntoConstraints = false
+        flipped.addSubview(rows)
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            rows.leadingAnchor.constraint(equalTo: flipped.leadingAnchor),
+            rows.topAnchor.constraint(equalTo: flipped.topAnchor),
+            rows.trailingAnchor.constraint(equalTo: flipped.trailingAnchor),
+            flipped.bottomAnchor.constraint(equalTo: rows.bottomAnchor),
+            flipped.widthAnchor.constraint(equalToConstant: 420),
+        ])
+        clip.documentView = flipped
+        st.addArrangedSubview(clip)
+        return st
+    }
+
+    @objc private func clearHotkeyClicked(_ sender: NSButton) {
+        guard let key = sender.identifier?.rawValue else { return }
+        SettingsStore.shared.clearDirectBinding(for: key)
+        selectPane(1)   // Pane neu aufbauen, Recorder-Titel spiegeln den neuen Zustand
     }
 
     private func paneDarstellung() -> NSView {
         let st = stack()
+        st.addArrangedSubview(sectionHeader("Bühne"))
+        st.addArrangedSubview(toggleRow("Fenster nach App gruppieren",
+            "Gruppenkopf mit Icon/Name/Anzahl je App statt einer flachen, nur nach Z-Order sortierten Liste.",
+            isOn: SettingsStore.shared.stageGroupByApp, action: #selector(toggleGroupByApp(_:))))
+        let sizeRow = NSStackView(views: [label("Kachelgröße:"), tileSizeSlider()])
+        sizeRow.spacing = 10
+        st.addArrangedSubview(sizeRow)
+        st.addArrangedSubview(hintLabel("Größere Kacheln zeigen mehr vom Fenster, lassen aber weniger pro Zeile zu — die Bühne wächst dann passend in die Höhe und wird mehrzeilig."))
+        st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Monitor-Farben"))
         st.addArrangedSubview(hintLabel("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts)."))
         let colors = SettingsStore.shared.monitorColors
@@ -413,6 +534,15 @@ final class SettingsWindowController: NSWindowController {
         }
         st.addArrangedSubview(NSButton(title: "Standardfarben", target: self, action: #selector(resetColors(_:))))
         return st
+    }
+
+    private func tileSizeSlider() -> NSSlider {
+        let s = NSSlider(value: Double(SettingsStore.shared.stageTileWidth), minValue: 110, maxValue: 320,
+                         target: self, action: #selector(tileSizeChanged(_:)))
+        s.isContinuous = true
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        return s
     }
 
     private func paneApps() -> NSView {
@@ -507,10 +637,13 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func toggleAutoMinimize(_ sender: NSButton) { SettingsStore.shared.autoMinimize = sender.state == .on }
-    @objc private func toggleRadial(_ sender: NSButton) { SettingsStore.shared.radialMenu = sender.state == .on }
     @objc private func toggleLinked(_ sender: NSButton) { SettingsStore.shared.linkedEdges = sender.state == .on }
     @objc private func toggleAutoApply(_ sender: NSButton) { SettingsStore.shared.autoApplyLayouts = sender.state == .on }
     @objc private func toggleDragSnap(_ sender: NSButton) { SettingsStore.shared.dragSnap = sender.state == .on }
+    @objc private func toggleLoopFillNeighbors(_ sender: NSButton) { SettingsStore.shared.loopFillNeighbors = sender.state == .on }
+    @objc private func toggleGroupByApp(_ sender: NSButton) { SettingsStore.shared.stageGroupByApp = sender.state == .on }
+    @objc private func toggleEnterSwitches(_ sender: NSButton) { SettingsStore.shared.stageEnterSwitches = sender.state == .on }
+    @objc private func tileSizeChanged(_ sender: NSSlider) { SettingsStore.shared.stageTileWidth = CGFloat(sender.doubleValue) }
 
     @objc private func colorChanged(_ well: NSColorWell) {
         SettingsStore.shared.setMonitorColor(well.color, at: well.tag)

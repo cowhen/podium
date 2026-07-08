@@ -1,8 +1,8 @@
 import AppKit
 
 // Randloses Fenster, das trotzdem Key werden kann. Tastatur geht komplett an
-// den Controller: Enter schließt (behalten), Escape leert erst die Suche und
-// rollt sonst alles zurück, jedes andere Zeichen filtert die Bühne.
+// den Controller: Enter/Klick positioniert (Loop-Modus), Escape rollt zurück
+// bzw. verlässt den Loop-Modus, jedes andere Zeichen filtert die Bühne.
 final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override func keyDown(with event: NSEvent) {
@@ -14,82 +14,90 @@ final class OverlayBackgroundView: FlippedVisualEffectView {
     override func mouseDown(with event: NSEvent) { OverlayController.shared.close() }
 }
 
-// "Karte + Bühne": Oben die maßstabsgetreue Monitor-Karte (eine Akzentfarbe
-// pro Monitor) mit den zugeordneten Fenstern — die einzige räumliche Wahrheit.
-// Unten EINE Bühne mit allen Hintergrund-Fenstern, gruppiert nach App; der
-// Farbpunkt jeder Kachel zeigt, auf welchem Monitor sie gerade liegt.
-// Position = Karte, Identität = App-Gruppe, Herkunft = Farbpunkt.
-// Jede Aktion wirkt sofort auf die echten Fenster; Escape stellt den Zustand
-// beim Öffnen wieder her.
+// "Bühne": alle verwalteten Fenster an einer Stelle, gruppiert nach App.
+// Auswahl per Tastatur/Suche/Klick, Enter oder Klick öffnet für das gewählte
+// Fenster den Loop-Modus (Ring-Menü) zur Positionierung — GENAU EIN Fenster
+// pro Aktion, keine Karte/Box-Anordnung mehr. Jede Aktion wirkt sofort auf die
+// echten Fenster; Escape auf der Bühne stellt den Zustand beim Öffnen wieder her.
 final class OverlayController: NSObject, NSWindowDelegate {
     static let shared = OverlayController()
 
     private var window: OverlayWindow?
-    private var mapBoxes: [CGDirectDisplayID: MonitorMapBox] = [:]
     private var stageView: StageView?
     private var searchLabel: NSTextField?
-    // Der pure Zuordnungs-Kern (Box-Inhalte, Bühne, Split-Stufen) lebt
-    // getrennt vom Controller in ArrangementModel — dort ist er testbar.
-    // Die Passthrough-Properties halten die bestehenden Lese-/Schreibstellen
-    // im Controller unverändert.
-    private var model = ArrangementModel()
-    private var assigned: [CGDirectDisplayID: [WinInfo]] {
-        get { model.assigned }
-        set { model.assigned = newValue }
-    }
-    private var stage: [WinInfo] {
-        get { model.stage }
-        set { model.stage = newValue }
-    }
-    // Z-Order aller Fenster beim Öffnen — sortiert die Bühne stabil, auch für
-    // zugeordnete Fenster, die dort zusätzlich erscheinen.
+    // Z-Order aller Fenster beim Öffnen — sortiert die Bühne stabil.
     private var zRank: [CGWindowID: Int] = [:]
-    // Rand-/Eck-Drop erzwingt eine bestimmte Stapelrichtung (top/bottom vs.
-    // links/rechts) unabhängig von der Monitor-Ausrichtung — siehe arrangeByZone.
-    // Nil = Standard (Monitor-Ausrichtung, display.vertical).
-    private var forcedVertical: [CGDirectDisplayID: Bool] = [:]
-
-    private var splitMode: [CGDirectDisplayID: Int] {
-        get { model.splitMode }
-        set { model.splitMode = newValue }
-    }
-    private var crossMode: [CGDirectDisplayID: Int] {
-        get { model.crossMode }
-        set { model.crossMode = newValue }
-    }
     private var displays: [Display] = []
     private var displayColors: [CGDirectDisplayID: NSColor] = [:]
-    // Tab-Stapel pro Monitor: ein Slot des Rasters hält mehrere Fenster
-    // übereinander, eine Tab-Leiste (TabBars) schaltet um. Überlebt bewusst
-    // das Schließen des Overlays.
-    struct TabStack { var slot: Int; var extras: [WinInfo] }
-    private var stacks: [CGDirectDisplayID: TabStack] = [:]
     private var allWins: [WinInfo] = []
     private var cfg = AppConfig()
-    private var snapshot: [(ax: AXUIElement, frame: CGRect)] = [] // Zustand beim Öffnen, für Escape
+    private var snapshot: [(ax: AXUIElement, frame: CGRect, minimized: Bool)] = [] // Zustand beim Öffnen, für Escape
+    // Apps, die diese Sitzung per Loop-Aktion ausgeblendet wurden — Escape
+    // muss sie wieder einblenden (Frames allein reichen nicht für "Zustand
+    // beim Öffnen wiederherstellen").
+    private var hiddenPids: Set<pid_t> = []
+    // Zuletzt per Loop-Aktion positioniertes Fenster — bekommt beim
+    // bewussten Schließen der Sitzung den Fokus (wer platziert, will benutzen).
+    private var lastCommitted: WinInfo?
     private var stageMaxWidth: CGFloat = Tuning.stageMaxWidthFloor
     private var search = ""
     private var fixedTopHeight: CGFloat = 0   // alles über der Bühne, für dynamische Fensterhöhe
     private var maxContentHeight: CGFloat = .greatestFiniteMagnitude
     private var innerWidth: CGFloat = 0       // Inhaltsbreite (ohne Padding), fix nach dem Aufbau
 
-    // Hover-/Drag-Zustand.
-    private var hoverBoxID: CGDirectDisplayID?
-    private var hoverStage = false
-    private weak var hoverTile: WindowTileView?
-    private var hoverTimer: Timer?
+    // Hover-Zustand für die Thumbnail-Großvorschau (unabhängig vom Loop-Modus).
     private weak var hoverSourceTile: WindowTileView?
+    private var hoverTimer: Timer?
     private var preview: PreviewPopup?
-    private var dragging = false
 
-    // Tastatur-Zustand: genau eine Auswahl (Ring), optional "gegriffen".
+    // Tastatur-Zustand: genau eine Auswahl auf der Bühne.
     private enum Dir { case left, right, up, down }
     private var selectedID: CGWindowID?
-    private var grabbed = false
     private var footerLabel: NSTextField?
     private var cheatsheet: NSView?
 
+    // Echte Markierung des gewählten Fensters auf seinem Monitor + kurzes
+    // Vorziehen, solange es gewählt ist (rutscht beim Abwählen wieder auf
+    // seinen ursprünglichen Platz zurück — siehe unraiseIfNeeded).
+    private var selectionHighlight: LoopPreviewPanel?
+    private var raisedForSelection: CGWindowID?
+
+    // Loop-Modus: Ring-Menü (eigenes schwebendes Panel, folgt der Maus über
+    // alle Monitore) + nicht-destruktive Vorschau fürs jeweils ausgewählte
+    // Fenster. Die Mausposition wird global beobachtet (wie DragSnap) statt
+    // lokal auf dem Ring, weil der Zeiger die meiste Zeit gar nicht über dem
+    // Ring liegt — er darf irgendwo im passenden Quadranten sein.
+    // Fenster, die diese Sitzung tatsächlich per Loop-Aktion angefasst
+    // wurden — steuert autoMinimize beim Schließen.
+    private var loopMenuView: LoopMenuView?
+    private var loopRingPanel: LoopRingPanel?
+    private var previewPanel: LoopPreviewPanel?
+    // Plain .mouseMoved-Events werden vom System nur erzeugt, wenn ein
+    // Fenster darunter das explizit anfordert — ein globaler NSEvent-Monitor
+    // dafür feuert deshalb oft gar nicht, sobald der Zeiger über einem
+    // fremden Fenster/Monitor steht. Ein Poll-Timer auf NSEvent.mouseLocation
+    // ist dagegen immer zuverlässig (öffentliche API, kein Event-Empfang nötig).
+    private var loopMouseTimer: Timer?
+    // Nur reagieren, wenn sich die Maus seit dem letzten Tick TATSÄCHLICH
+    // bewegt hat — sonst überschreibt der 60Hz-Poll ständig jede Tastatur-
+    // Auswahl (M/U/Z/…) im nächsten Tick wieder mit der (unveränderten)
+    // Maus-Zone, noch bevor man das Ergebnis überhaupt sieht.
+    private var lastPolledMouseLocation: NSPoint?
+    private var loopTarget: WinInfo?
+    private var loopAnchorDisplay: Display?   // Monitor, auf dem der Ring aktuell "sitzt"
+    private var touchedIDs: Set<CGWindowID> = []
+    private var stashed: [CGWindowID: (frame: CGRect, edge: BentoZone)] = [:]
+    private let monitorBadges = MonitorBadgeSet()
+
     func toggle() { window == nil ? open() : close() }
+
+    // Fokussieren + Overlay schließen — der klassische Switcher-Pfad. Kein
+    // autoMinimize: ein Fokuswechsel ist kein "Sitzung fertig, aufräumen".
+    private func focusAndClose(_ info: WinInfo) {
+        revive(info)
+        axFocus(info.ax)
+        close(applyAutoMinimize: false)
+    }
 
     func open() {
         ensureScreenRecordingAccess()
@@ -98,123 +106,122 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard !ds.isEmpty else { return }
         displays = ds
         displayColors = Dictionary(uniqueKeysWithValues: ds.enumerated().map { ($0.element.id, monitorAccent($0.offset)) })
-        forcedVertical = [:]
+        monitorBadges.show(displays: ds)
 
         cfg = AppConfig.load()
         allWins = appWM.collectWindows(cfg: cfg)
-        snapshot = allWins.map { ($0.ax, $0.bounds) }
-        let rank = appWM.zOrderRank()
-        zRank = rank
-        let sorted = appWM.perMonitorOrder(displays: ds, wins: allWins, rank: rank)
-
-        // Pro Monitor die kaum überlappenden Vordergrund-Fenster in die Karte,
-        // der ganze Rest global (nach Z-Order) auf die Bühne. "Floatende"
-        // Apps (Finder, Systemeinstellungen, ...) nehmen nie am Kacheln teil
-        // und starten deshalb immer auf der Bühne.
-        assigned = [:]
-        splitMode = [:]
-        crossMode = [:]
+        snapshot = allWins.map { ($0.ax, $0.bounds, $0.minimized) }
+        zRank = appWM.zOrderRank()
         search = ""
-        var restAll: [WinInfo] = []
-        for d in ds {
-            let laned = sorted[d.id] ?? []
-            let tileable = laned.filter { !cfg.isFloating(pid: $0.pid, name: $0.app) && !$0.minimized }
-            let floating = laned.filter { cfg.isFloating(pid: $0.pid, name: $0.app) || $0.minimized }
-            let (front, rest) = appWM.selectForeground(tileable)
-            // Slots nach realer Bildschirmposition besetzen (links = Slot 0
-            // usw.), nicht nach Z-Order — sonst zeigt die Box die Fenster
-            // seitenverkehrt zur Realität.
-            assigned[d.id] = slotOrderIndices(front.map { $0.bounds }, vertical: d.vertical).map { front[$0] }
-            restAll.append(contentsOf: rest)
-            restAll.append(contentsOf: floating)
-        }
-        stage = restAll.sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
+        touchedIDs = []
+        hiddenPids = []
 
-        // Bestehende Tab-Stapel revalidieren: Extras mit frischen WinInfos
-        // versehen und von der Bühne nehmen; verwaiste Stapel auflösen.
-        for (id, st) in stacks {
-            let fresh = st.extras.compactMap { old in allWins.first { $0.windowID == old.windowID } }
-            if fresh.isEmpty {
-                stacks[id] = nil
-                TabBars.shared.remove(id)
-                continue
-            }
-            stacks[id]?.extras = fresh
-            stage.removeAll { w in fresh.contains { $0.windowID == w.windowID } }
-        }
+        // Verbundene Ränder auch für Fenster anmelden, die von Hand (nicht
+        // über Podium) nebeneinandergeschoben wurden — sobald die Bühne
+        // einmal offen war, kennt LinkedEdges sie und kann bei künftigem
+        // Resize live erkennen, ob sie wirklich angrenzen.
+        let tileable = allWins.filter { !isFloatingWin($0) && !$0.minimized }
+        LinkedEdges.shared.track(tileable.map { $0.ax })
 
         buildWindow()
     }
 
     // Schließen und alle Änderungen behalten; Anordnung für Wake-Restore merken.
-    func close() {
-        // Option: Hintergrund-Fenster (Bühne, nicht floatend) beim Schließen
-        // minimieren — die Karte zeigt dann nur noch, was wirklich sichtbar ist.
-        if SettingsStore.shared.autoMinimize {
-            for w in stage where !isFloatingWin(w) && !w.minimized {
+    // applyAutoMinimize=false für unfreiwillige Schließungen (Fokusverlust an
+    // Spotlight/System-Dialog/Fremd-Klick) — sonst minimiert jeder kurze
+    // Fokusverlust bei aktivem autoMinimize den halben Desktop.
+    func close(applyAutoMinimize: Bool = true) {
+        // Option: alle Fenster minimieren, die diese Sitzung NICHT per
+        // Loop-Aktion angefasst wurden — floatende ausgenommen.
+        if applyAutoMinimize, SettingsStore.shared.autoMinimize {
+            for w in allWins where !touchedIDs.contains(w.windowID) && !isFloatingWin(w) && !w.minimized {
                 axSetMinimized(w.ax, true)
             }
+        }
+        // Nur beim BEWUSSTEN Schließen (nicht bei Fokusverlust — da hat der
+        // Nutzer den Fokus gerade selbst woandershin gelegt): das zuletzt
+        // positionierte Fenster bekommt den Fokus.
+        if applyAutoMinimize, let w = lastCommitted { axFocus(w.ax) }
+        RestoreCenter.shared.bless(allWins)
+        teardown()
+    }
+
+    // Escape auf der Bühne: alle Fenster auf den Zustand beim Öffnen
+    // zurücksetzen — Frames UND Sichtbarkeit (per Loop ausgeblendete Apps
+    // wieder einblenden, unfreiwillig Minimiertes zurückholen).
+    func revert() {
+        for pid in hiddenPids { NSRunningApplication(processIdentifier: pid)?.unhide() }
+        for (ax, frame, wasMinimized) in snapshot {
+            if !wasMinimized, axBool(ax, kAXMinimizedAttribute as String) {
+                axSetMinimized(ax, false)
+            }
+            axSetFrame(ax, frame)
         }
         RestoreCenter.shared.bless(allWins)
         teardown()
     }
 
-    // Escape: alle Fenster auf den Zustand beim Öffnen zurücksetzen.
-    func revert() {
-        for (ax, frame) in snapshot { axSetFrame(ax, frame) }
-        RestoreCenter.shared.bless(allWins)
-        teardown()
-    }
-
     private func teardown() {
-        clearHover()
-        hidePreview()
         hoverTimer?.invalidate()
+        hidePreview()
+        selectionHighlight?.hide()
+        selectionHighlight = nil
+        monitorBadges.hide()
+        unraiseIfNeeded()
+        stopLoopTracking()
+        loopMenuView = nil
         window?.orderOut(nil)
         window = nil
-        mapBoxes = [:]
         stageView = nil
         searchLabel = nil
         footerLabel = nil
         cheatsheet = nil
-        splitMode = [:]
-        crossMode = [:]
-        dragging = false
-        grabbed = false
         selectedID = nil
+        touchedIDs = []
+        hiddenPids = []
+        lastCommitted = nil
+        // `stashed` bewusst NICHT leeren: gestashte Fenster hängen sonst nach
+        // Overlay-Schließen für immer offscreen (⇧S fände nichts mehr) —
+        // App-Lebenszeit-Gedächtnis wie WindowHistory.
     }
 
     // MARK: Tastatur
 
-    // Grundregel: Buchstaben gehören dem Filter, Ziffern den Monitoren,
-    // Pfeile der Bewegung. Ob Pfeile navigieren oder das Fenster verschieben,
-    // entscheidet allein der Greifen-Zustand (sichtbar: orangener Ring).
+    // Grundregel: Buchstaben gehören dem Filter, Pfeile der Bewegung. Ist der
+    // Loop-Modus offen, geht die Tastatur zuerst an ihn (eigene Legende).
     func handleKey(_ event: NSEvent) -> Bool {
         if cheatsheet != nil { hideCheatsheet(); return true }
-        let shift = event.modifierFlags.contains(.shift)
+        if let menu = loopMenuView { return menu.handleKey(event) }
         let cmd = event.modifierFlags.contains(.command)
 
         switch event.keyCode {
         case 36, 76: enterPressed(cmd: cmd); return true
         case 53: escPressed(); return true
         case 49: spacePressed(); return true
-        case 123: arrow(.left, shift: shift); return true
-        case 124: arrow(.right, shift: shift); return true
-        case 125: arrow(.down, shift: shift); return true
-        case 126: arrow(.up, shift: shift); return true
+        case 123: navigate(.left); return true
+        case 124: navigate(.right); return true
+        case 125: navigate(.down); return true
+        case 126: navigate(.up); return true
         case 51:
-            if cmd { if let w = selectedInfo() { closeRequested(w) }; return true }
+            if cmd { if let w = selectedInfo() { closeRequested(w) }; return true }   // ⌘⌫ = Fenster schließen
             guard !search.isEmpty else { return false }
             setSearch(String(search.dropLast()))
             return true
         default: break
         }
 
+        // Fenster-Aktionen direkt auf der Bühne (ohne Loop-Modus-Umweg).
+        if cmd, let s = event.charactersIgnoringModifiers?.lowercased() {
+            switch s {
+            case "m": if let w = selectedInfo() { minimizeFromStage(w) }; return true
+            case "h": if let w = selectedInfo() { hideFromStage(w) }; return true
+            default: break
+            }
+        }
+
         guard !cmd, !event.modifierFlags.contains(.control),
               let s = event.charactersIgnoringModifiers, let ch = s.first, s.count == 1
         else { return false }
-        if let d = ch.wholeNumberValue { digitPressed(d); return true }
-        if ch == "=" { resetRatio(); return true }
         if ch == "?" { showCheatsheet(); return true }
         guard s.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { return false }
         setSearch(search + s)
@@ -237,87 +244,40 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func selectedInfo() -> WinInfo? {
         guard let id = selectedID else { return nil }
-        for arr in assigned.values { if let w = arr.first(where: { $0.windowID == id }) { return w } }
-        return stage.first { $0.windowID == id }
+        return allWins.first { $0.windowID == id }
     }
 
-    private func orderedTiles() -> [WindowTileView] {
-        var out: [WindowTileView] = []
-        for d in displays { out += mapBoxes[d.id]?.tiles ?? [] }
-        out += stageView?.tiles ?? []
-        return out
-    }
-
-    // Enter ist nach Region entschärft: Auf einer BÜHNEN-Kachel fokussiert es
-    // (Switcher-Kern), auf einer BOX-Kachel schließt es nur das Overlay und
-    // behält alles — vorher hat Enter dort das gewählte Fenster fokussiert
-    // und damit den "Bestätigen"-Reflex bestraft. ⌘↵ fokussiert immer.
+    // Interaktionsmodell per Einstellung (stageEnterSwitches):
+    // Aus (Default): Enter/Klick = Loop-Modus, ⌘↵/Doppelklick = nur wechseln.
+    // An: Enter/Klick = nur wechseln (klassischer Switcher), Leertaste/⌘↵ = Loop-Modus.
     private func enterPressed(cmd: Bool) {
-        if grabbed {
-            grabbed = false
-            // Serien-Flow: Filter bleibt, Ring springt zum nächsten Treffer.
-            if !search.isEmpty, let next = stageView?.tiles.first {
-                selectedID = next.info.windowID
-            }
-            updateSelectionUI()
-            updateFooter()
-            return
+        guard let w = selectedInfo() else { return }
+        let switchFirst = SettingsStore.shared.stageEnterSwitches
+        let wantsSwitch = switchFirst ? !cmd : cmd
+        if wantsSwitch {
+            focusAndClose(w)
+        } else {
+            openLoopMode(for: w)
         }
-        let w = selectedInfo()
-        let onStage = w.map { win in stage.contains { $0.windowID == win.windowID } } ?? false
-        if let w, cmd || onStage {
-            axFocus(w.ax)
+    }
+
+    // Leertaste: im Switcher-Modus der Weg in den Loop-Modus; sonst ein
+    // normales Suchzeichen (Fenstertitel enthalten Leerzeichen).
+    private func spacePressed() {
+        if SettingsStore.shared.stageEnterSwitches {
+            openLoopMode(for: selectedInfo())
+        } else {
+            setSearch(search + " ")
         }
-        close()
     }
 
     private func escPressed() {
-        if grabbed { grabbed = false; updateSelectionUI(); updateFooter(); return }
         if !search.isEmpty { setSearch(""); return }
         revert()
     }
 
-    private func spacePressed() {
-        guard let w = selectedInfo(), boxOwner(of: w) != nil else { return }
-        grabbed.toggle()
-        updateSelectionUI()
-        updateFooter()
-    }
-
-    // 1-4 = Wurf auf Monitor N (+ automatisch greifen), 0 = zurück auf die Bühne.
-    private func digitPressed(_ d: Int) {
-        guard let w = selectedInfo() else { return }
-        if d == 0 {
-            if boxOwner(of: w) != nil { demote(w) }
-            grabbed = false
-        } else {
-            guard d >= 1, d <= displays.count else { return }
-            grabbed = place(w, onto: displays[d - 1].id)
-        }
-        selectedID = w.windowID
-        updateSelectionUI()
-        updateFooter()
-    }
-
-    private func arrow(_ dir: Dir, shift: Bool) {
-        if shift, let w = selectedInfo(), let id = boxOwner(of: w) {
-            switch dir {
-            case .left: stepRatio(id, main: true, up: false)
-            case .right: stepRatio(id, main: true, up: true)
-            case .up: stepRatio(id, main: false, up: true)
-            case .down: stepRatio(id, main: false, up: false)
-            }
-            return
-        }
-        if grabbed, let w = selectedInfo(), let id = boxOwner(of: w) {
-            moveGrabbed(w, in: id, dir: dir)
-            return
-        }
-        navigate(dir)
-    }
-
     private func navigate(_ dir: Dir) {
-        let tiles = orderedTiles()
+        let tiles = stageView?.tiles ?? []
         guard !tiles.isEmpty else { return }
         guard let cur = tiles.firstIndex(where: { $0.info.windowID == selectedID }) else {
             selectedID = tiles[0].info.windowID
@@ -327,136 +287,69 @@ final class OverlayController: NSObject, NSWindowDelegate {
         switch dir {
         case .left: selectedID = tiles[(cur - 1 + tiles.count) % tiles.count].info.windowID
         case .right: selectedID = tiles[(cur + 1) % tiles.count].info.windowID
-        case .down: if let t = stageView?.tiles.first { selectedID = t.info.windowID }
-        case .up: if let t = displays.lazy.compactMap({ self.mapBoxes[$0.id]?.tiles.first }).first { selectedID = t.info.windowID }
+        case .up, .down:
+            let curFrame = tiles[cur].frame
+            let candidates = tiles.enumerated().filter { _, t in
+                dir == .up ? t.frame.minY < curFrame.minY - 4 : t.frame.minY > curFrame.minY + 4
+            }
+            if let best = candidates.min(by: { a, b in
+                let da = abs(a.element.frame.midX - curFrame.midX) + abs(a.element.frame.minY - curFrame.minY)
+                let db = abs(b.element.frame.midX - curFrame.midX) + abs(b.element.frame.minY - curFrame.minY)
+                return da < db
+            }) {
+                selectedID = best.element.info.windowID
+            }
         }
         updateSelectionUI()
-    }
-
-    // Gegriffenes Fenster verschieben: erst innerhalb der Box (Slot-Tausch in
-    // Pfeilrichtung), am Rand darüber hinaus räumlich zum Nachbar-Monitor.
-    private func moveGrabbed(_ w: WinInfo, in id: CGDirectDisplayID, dir: Dir) {
-        guard let box = mapBoxes[id], let idx = assigned[id]?.firstIndex(where: { $0.windowID == w.windowID }) else { return }
-        let cur = box.tiles[idx].frame
-        var best: Int?
-        var bestScore = CGFloat.greatestFiniteMagnitude
-        for (i, t) in box.tiles.enumerated() where i != idx {
-            let dx = t.frame.midX - cur.midX, dy = t.frame.midY - cur.midY   // Box ist geflippt: +y = runter
-            let ok: Bool
-            switch dir {
-            case .left: ok = dx < -5 && abs(dx) >= abs(dy)
-            case .right: ok = dx > 5 && abs(dx) >= abs(dy)
-            case .up: ok = dy < -5 && abs(dy) > abs(dx)
-            case .down: ok = dy > 5 && abs(dy) > abs(dx)
-            }
-            if ok, abs(dx) + abs(dy) < bestScore { bestScore = abs(dx) + abs(dy); best = i }
-        }
-        if let b = best {
-            model.swapInBox(id, idx, b)
-            retile(id)
-        } else if let nid = neighborDisplay(of: id, dir: dir) {
-            assign(w, to: nid)
-        }
-        updateSelectionUI()
-    }
-
-    // Räumlicher Nachbar in Pfeilrichtung, nach echter Monitor-Anordnung.
-    private func neighborDisplay(of id: CGDirectDisplayID, dir: Dir) -> CGDirectDisplayID? {
-        guard let cur = displays.first(where: { $0.id == id }) else { return nil }
-        let c = CGPoint(x: cur.full.midX, y: cur.full.midY)
-        return displays
-            .filter { d in
-                guard d.id != id else { return false }
-                let dx = d.full.midX - c.x, dy = d.full.midY - c.y
-                switch dir {
-                case .left: return dx < -10
-                case .right: return dx > 10
-                case .up: return dy < -10     // Quartz: +y = runter
-                case .down: return dy > 10
-                }
-            }
-            .min { hypot($0.full.midX - c.x, $0.full.midY - c.y) < hypot($1.full.midX - c.x, $1.full.midY - c.y) }?
-            .id
-    }
-
-    private func stepRatio(_ id: CGDirectDisplayID, main: Bool, up: Bool) {
-        let current = main ? (splitMode[id] ?? 0) : (crossMode[id] ?? 0)
-        let next = ArrangementModel.stepMode(current, up: up)
-        guard next != current else { return }
-        if main { splitMode[id] = next } else { crossMode[id] = next }
-        retile(id)
-    }
-
-    private func resetRatio() {
-        guard let w = selectedInfo(), let id = boxOwner(of: w) else { return }
-        splitMode[id] = 0
-        crossMode[id] = 0
-        retile(id)
-    }
-
-    // Fenster einem Monitor zuordnen — normal im Raster, oder für "floatende"
-    // Apps (siehe AppConfig.isFloating) nur zentriert obendrauf, ohne am
-    // Kacheln teilzunehmen. Rückgabewert: ob es im Raster gelandet ist
-    // (relevant fürs Greifen — floatende Fenster lassen sich nicht greifen).
-    @discardableResult
-    private func place(_ info: WinInfo, onto id: CGDirectDisplayID) -> Bool {
-        revive(info)
-        guard !cfg.isFloating(pid: info.pid, name: info.app) else {
-            floatPlace(info, onto: id)
-            return false
-        }
-        assign(info, to: id)
-        return true
-    }
-
-    // Verschiebt ein floatendes Fenster auf einen Monitor: Größe bleibt exakt
-    // erhalten, es wird nur zentriert und nach vorn geholt.
-    private func floatPlace(_ info: WinInfo, onto id: CGDirectDisplayID) {
-        guard let d = displays.first(where: { $0.id == id }) else { return }
-        appWM.floatWindow(info.ax, on: d)
-        if let idx = stage.firstIndex(where: { $0.windowID == info.windowID }), let f = axFrame(info.ax) {
-            stage[idx] = stage[idx].with(bounds: f)
-        }
-        refreshStage()
-        (stageView?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
-    }
-
-    // Fenster per Tastatur/Maus ins Raster eines Monitors zuordnen (wie
-    // externer Box-Drop). Nur für nicht-floatende Fenster — siehe place().
-    private func assign(_ info: WinInfo, to id: CGDirectDisplayID) {
-        forcedVertical[id] = nil   // nicht Zonen-gesteuert: Monitor-Standardausrichtung
-        let sourceBox = model.dropFromOutside(info, onto: id)
-        retile(id)
-        if let sourceBox, sourceBox != id { retile(sourceBox) }
-        refreshStage()
     }
 
     // MARK: Tastatur-Visualisierung
 
     private func updateSelectionUI() {
-        for t in orderedTiles() {
-            t.setKeyboardSelection(t.info.windowID == selectedID, grabbed: grabbed)
+        for t in stageView?.tiles ?? [] {
+            t.setKeyboardSelection(t.info.windowID == selectedID)
         }
-        // Karte: bei aktivem Filter Nicht-Treffer abdunkeln, Treffer leuchten.
-        for box in mapBoxes.values {
-            for t in box.tiles + box.ghostTiles { t.setDimmed(!search.isEmpty && !matchesSearch(t.info)) }
+        updateRealHighlight()
+    }
+
+    // Zeigt einen Rahmen um das ECHTE gewählte Fenster an seiner realen
+    // Bildschirmposition und holt es kurz nach vorn, solange es gewählt ist.
+    private func updateRealHighlight() {
+        guard let id = selectedID, let info = allWins.first(where: { $0.windowID == id }) else {
+            selectionHighlight?.hide()
+            unraiseIfNeeded()
+            return
         }
-        // Im Greifen-Modus glüht die Box, die das Fenster gerade hält.
-        for (id, box) in mapBoxes {
-            let holds = grabbed && (assigned[id]?.contains { $0.windowID == selectedID } ?? false)
-            box.setDropTarget(holds)
+        if raisedForSelection != id {
+            unraiseIfNeeded()
+            axRaise(info.ax)
+            raisedForSelection = id
         }
+        if selectionHighlight == nil { selectionHighlight = LoopPreviewPanel() }
+        selectionHighlight?.show(quartzRect: info.bounds)
+    }
+
+    // Setzt das zuvor vorgezogene Fenster wieder auf seinen ursprünglichen
+    // Platz zurück: alle Fenster, die beim Öffnen der Bühne davor lagen,
+    // in ihrer ursprünglichen Reihenfolge erneut anheben (von hinten nach
+    // vorn) — das zurückgesetzte Fenster selbst bleibt unangetastet und
+    // rutscht so wieder hinter sie. axRaise ändert nur die Fenster-Server-
+    // Reihenfolge, nicht den App-Fokus — stört also nie die Tastatur des Overlays.
+    private func unraiseIfNeeded() {
+        guard let id = raisedForSelection else { return }
+        raisedForSelection = nil
+        guard let originalRank = zRank[id] else { return }
+        let inFrontOriginally = allWins
+            .filter { (zRank[$0.windowID] ?? .max) < originalRank }
+            .sorted { (zRank[$0.windowID] ?? .max) > (zRank[$1.windowID] ?? .max) }
+        for w in inFrontOriginally { axRaise(w.ax) }
     }
 
     private func updateFooter() {
-        // Ratio-Shortcut wirkt bereits bei bloßer Auswahl (kein Greifen
-        // nötig) — muss deshalb in BEIDEN Footer-Varianten auftauchen, sonst
-        // sucht man ihn nur im Greifen-Modus und drückt aus Verlegenheit ↵
-        // (das schließt das Overlay).
-        footerLabel?.stringValue = grabbed
-            ? "←↑↓→ Slot/Monitor   ⇧←→⇧↑↓ Ratio   = 50/50   0 Bühne   ↵ ablegen"
-            : "tippen filtert   ←→ wählen   ⇧←→⇧↑↓ Ratio   1–4 werfen   ↵ fokussieren   ? Hilfe"
-        footerLabel?.textColor = grabbed ? .systemOrange : .tertiaryLabelColor
+        footerLabel?.stringValue = loopMenuView != nil
+            ? "←→↑↓ Rand   U I J K Ecken   E/⇧E Extras   M A H W C Allgemein   Z/⇧Z Minimieren   X Ausblenden   S/⇧S Stash   ⌘Z Rückgängig   1–9 Monitor   ⇥/⇧⇥ Wechseln   ↵ anwenden   Esc zurück"
+            : "tippen filtert   ←→↑↓ wählen   ↵ / Klick positionieren   ? Hilfe"
+        footerLabel?.textColor = loopMenuView != nil ? .systemOrange : .tertiaryLabelColor
     }
 
     private func showCheatsheet() {
@@ -500,13 +393,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func buildWindow() {
         let padding: CGFloat = 28
-        let sectionGap: CGFloat = 18
         let headerH: CGFloat = 22
 
         // Das Overlay erscheint zentriert auf dem Bildschirm mit dem
         // Mauszeiger. Breite: so viel wie der Inhalt braucht, höchstens 75 %
-        // der Bildschirmbreite — zentriert bleiben die Ränder auf allen
-        // Seiten gleich. Höhe folgt dem Inhalt (siehe resizeToFitStage),
+        // der Bildschirmbreite. Höhe folgt dem Inhalt (siehe resizeToFitStage),
         // gedeckelt bei 85 % der Bildschirmhöhe.
         let mouse = NSEvent.mouseLocation
         let targetScreen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
@@ -514,42 +405,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
         maxContentHeight = (vis.height * 0.85).rounded()
         let availW = (vis.width * 0.75).rounded() - padding * 2
 
-        // Karte oben: die ganze reale Anordnung (inkl. Lücken/Versatz) in die
-        // Kartenfläche einpassen — wie im Anordnungstab der Systemeinstellungen.
-        let unionMinX = displays.map { $0.full.minX }.min() ?? 0
-        let unionMinY = displays.map { $0.full.minY }.min() ?? 0
-        let unionMaxX = displays.map { $0.full.maxX }.max() ?? 1
-        let unionMaxY = displays.map { $0.full.maxY }.max() ?? 1
-        let unionW = max(unionMaxX - unionMinX, 1), unionH = max(unionMaxY - unionMinY, 1)
-        var scale = min(availW / unionW, maxContentHeight * 0.45 / unionH)
-        let maxLongEdge = displays.map { max($0.full.width, $0.full.height) }.max() ?? 1000
-        scale = max(scale, Tuning.minBoxLongEdge / maxLongEdge)   // Mindestgröße für Lesbarkeit
-
-        var mapWidth: CGFloat = 0, mapHeight: CGFloat = 0
-        for (i, d) in displays.enumerated() {
-            let f = NSRect(x: (d.full.minX - unionMinX) * scale, y: (d.full.minY - unionMinY) * scale,
-                           width: d.full.width * scale, height: d.full.height * scale)
-            let box = MonitorMapBox(display: d, number: i + 1, accent: displayColors[d.id] ?? .controlAccentColor,
-                                    frame: f, controller: self)
-            box.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0, cross: crossMode[d.id] ?? 0, ghosts: ghostWins(for: d.id))
-            mapBoxes[d.id] = box
-            mapWidth = max(mapWidth, f.maxX)
-            mapHeight = max(mapHeight, f.maxY)
-        }
         // Bühne erst am 75%-Maximum layouten und messen, dann die Breite auf
         // den tatsächlichen Bedarf trimmen und ggf. enger neu umbrechen.
         let stageV = StageView(controller: self)
         stageV.setWindows(stageList(), filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin)
-        innerWidth = min(availW, max(mapWidth, stageV.frame.width, 420))
+        innerWidth = min(availW, max(stageV.frame.width, 420))
         if innerWidth < availW {
             stageV.setWindows(stageList(), filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin)
         }
         stageMaxWidth = innerWidth
         stageView = stageV
-        let mapXOffset = ((innerWidth - mapWidth) / 2).rounded()   // Karte horizontal zentrieren
 
         let contentWidth = innerWidth + padding * 2
-        fixedTopHeight = padding + mapHeight + sectionGap + headerH + 10
+        fixedTopHeight = padding + headerH + 10
         let contentHeight = min(fixedTopHeight + stageV.frame.height + 18 + padding, maxContentHeight)
         let contentSize = NSSize(width: contentWidth, height: contentHeight)
 
@@ -585,21 +453,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         sheen.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
         bg.addSubview(sheen)
 
-        for box in mapBoxes.values {
-            box.frame.origin.x += padding + mapXOffset
-            box.frame.origin.y += padding
-            bg.addSubview(box)
-        }
-
-        // Kopfzeile der Bühne: Titel links, Suche rechts, Trennlinie darüber.
-        let headerY = padding + mapHeight + sectionGap
-        let divider = NSBox(frame: NSRect(x: padding, y: headerY - 9, width: contentWidth - padding * 2, height: 1))
-        divider.boxType = .custom
-        divider.fillColor = NSColor.white.withAlphaComponent(0.1)
-        divider.borderWidth = 0
-        bg.addSubview(divider)
-
-        let title = NSTextField(labelWithString: "Hintergrund · nach App")
+        // Kopfzeile der Bühne: Titel links, Suche rechts.
+        let headerY = padding
+        let title = NSTextField(labelWithString: "Bühne · nach App")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         title.textColor = .secondaryLabelColor
         title.frame = NSRect(x: padding, y: headerY, width: 240, height: 17)
@@ -629,8 +485,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         bg.addSubview(footer)
         updateFooter()
 
-        // Start-Auswahl: erstes Karten-Fenster, sonst erste Bühnen-Kachel.
-        selectedID = (displays.compactMap { mapBoxes[$0.id]?.tiles.first }.first ?? stageV.tiles.first)?.info.windowID
+        // Start-Auswahl: das aktuell aktive Fenster, sonst die erste Kachel.
+        selectedID = appWM.activeWindow(among: allWins)?.windowID ?? stageV.tiles.first?.info.windowID
         updateSelectionUI()
 
         window = win
@@ -644,7 +500,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    func windowDidResignKey(_ notification: Notification) { close() }
+    // Unfreiwilliger Fokusverlust (Spotlight, System-Dialog, Fremd-Klick):
+    // schließen, aber NICHT aufräumen (kein autoMinimize) — der Nutzer hat
+    // die Sitzung nicht bewusst beendet.
+    func windowDidResignKey(_ notification: Notification) { close(applyAutoMinimize: false) }
 
     // 9-Patch-Maske für die Effect-View: Ecken fix, Mitte dehnbar.
     private static func roundedMask(radius: CGFloat) -> NSImage {
@@ -669,42 +528,27 @@ final class OverlayController: NSObject, NSWindowDelegate {
         cfg.isFloating(pid: w.pid, name: w.app)
     }
 
+    // Der Monitor, auf dem ein Fenster aktuell (mehrheitlich) liegt.
+    private func display(for w: WinInfo) -> Display? {
+        guard let id = displayID(containing: CGPoint(x: w.bounds.midX, y: w.bounds.midY), in: displays) else { return displays.first }
+        return displays.first { $0.id == id }
+    }
+
     // Minimierte Fenster vor jeder Aktion zurückholen.
     private func revive(_ info: WinInfo) {
         guard info.minimized else { return }
         axSetMinimized(info.ax, false)
     }
 
-    // Bühnen-Fenster, die real auf diesem Monitor liegen — als Geister-Kacheln
-    // in der Box, damit die Karte den vollständigen Ist-Zustand zeigt.
-    private func ghostWins(for id: CGDirectDisplayID) -> [WinInfo] {
-        stage.filter { displayID(containing: CGPoint(x: $0.bounds.midX, y: $0.bounds.midY), in: displays) == id }
-    }
+    // MARK: Hover & Vorschau (Thumbnail-Großvorschau, unabhängig vom Loop-Modus)
 
-    // MARK: Treffer-Ermittlung
-
-    // Bei überlappenden Hit-Areas (aneinandergrenzende Boxen, ±14pt Rand)
-    // entscheidet die Distanz zum Box-Mittelpunkt — nicht die zufällige
-    // Dictionary-Reihenfolge.
-    private func nearestBoxID(at p: NSPoint) -> CGDirectDisplayID? {
-        mapBoxes
-            .filter { $0.value.hitAreaInWindow.contains(p) }
-            .min { distToCenter($0.value.hitAreaInWindow, p) < distToCenter($1.value.hitAreaInWindow, p) }?
-            .key
-    }
-
-    private func distToCenter(_ r: NSRect, _ p: NSPoint) -> CGFloat {
-        hypot(r.midX - p.x, r.midY - p.y)
-    }
-
-    private func boxOwner(of info: WinInfo) -> CGDirectDisplayID? {
-        model.boxOwner(of: info.windowID)
-    }
-
-    // MARK: Hover & Vorschau
-
+    // Maus-Hover zählt genauso als Auswahl wie Pfeiltasten — sofort (ohne
+    // Verzögerung), damit sich das Durchschalten mit der Maus genauso
+    // reaktionsschnell anfühlt. Der (separat verzögerte) Thumbnail-Zoom
+    // darunter ist ein eigenes, unabhängiges Feature.
     func tileHoverBegan(_ tile: WindowTileView) {
-        guard !dragging else { return }
+        selectedID = tile.info.windowID
+        updateSelectionUI()
         hoverSourceTile = tile
         hoverTimer?.invalidate()
         hoverTimer = Timer.scheduledTimer(withTimeInterval: Tuning.hoverPreviewDelay, repeats: false) { [weak self] _ in
@@ -720,7 +564,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func showPreview() {
-        guard !dragging, let tile = hoverSourceTile, let root = window?.contentView else { return }
+        guard let tile = hoverSourceTile, let root = window?.contentView else { return }
         hidePreview()
         let popup = PreviewPopup(info: tile.info, image: ThumbnailCache.shared.image(for: tile.info.windowID))
         let tf = tile.convert(tile.bounds, to: root)
@@ -743,469 +587,363 @@ final class OverlayController: NSObject, NSWindowDelegate {
         preview = nil
     }
 
-    // MARK: Drag-Feedback
+    // MARK: Klick
 
-    func dragBegan() {
-        dragging = true
-        hoverTimer?.invalidate()
-        hidePreview()
-    }
-
-    // Live-Feedback während des Drags: Ziel-Box/Bühne bekommt einen
-    // Akzentrahmen; würde der Drop eine konkrete Kachel ersetzen/tauschen,
-    // wird zusätzlich diese markiert.
-    func dragHover(_ info: WinInfo, at p: NSPoint) {
-        let boxID = nearestBoxID(at: p)
-        let stageOn = boxID == nil && boxOwner(of: info) != nil
-            && stageView?.hitAreaInWindow.contains(p) == true
-
-        // Zonen-Vorschau: alle Boxen zurücksetzen, dann in der Ziel-Box den
-        // Slot zeigen, den der Drop treffen würde (Rand/Ecke) — dieselbe Optik
-        // wie die On-Screen-Vorschau, nur box-lokal.
-        for b in mapBoxes.values { b.hideZonePreview() }
-
-        var candidate: WindowTileView?
-        if let id = boxID, let box = mapBoxes[id] {
-            let arr = assigned[id] ?? []
-            let isInternal = arr.contains { $0.windowID == info.windowID }
-            if !isInternal, arr.count < Tuning.maxAssigned, let zone = box.bentoZone(atWindowPoint: p) {
-                // Freier Rand/Ecke: Bento-Vorschau statt Tausch-Markierung.
-                box.showZonePreview(zone: zone, othersCount: arr.count)
-            } else {
-                let wouldReplace = isInternal || arr.count >= Tuning.maxAssigned
-                if wouldReplace, let idx = box.dropSlot(atWindowPoint: p),
-                   arr.indices.contains(idx), arr[idx].windowID != info.windowID {
-                    candidate = box.tiles[idx]
-                }
-            }
-        }
-        setHover(box: boxID, stage: stageOn, tile: candidate)
-    }
-
-    func groupDragHover(at p: NSPoint) {
-        setHover(box: nearestBoxID(at: p), stage: false, tile: nil)
-    }
-
-    private func setHover(box: CGDirectDisplayID?, stage stageOn: Bool, tile: WindowTileView?) {
-        if hoverBoxID != box {
-            hoverBoxID.flatMap { mapBoxes[$0] }?.setDropTarget(false)
-            box.flatMap { mapBoxes[$0] }?.setDropTarget(true)
-            hoverBoxID = box
-        }
-        if hoverStage != stageOn {
-            stageView?.setDropTarget(stageOn)
-            hoverStage = stageOn
-        }
-        if hoverTile !== tile {
-            hoverTile?.setDropCandidate(false)
-            tile?.setDropCandidate(true)
-            hoverTile = tile
-        }
-    }
-
-    private func clearHover() {
-        setHover(box: nil, stage: false, tile: nil)
-        for b in mapBoxes.values { b.hideZonePreview() }
-    }
-
-    // MARK: Drop
-
-    // Drop auf eine Box = zuordnen (anhängen solange Platz, sonst gezielt
-    // ersetzen; innerhalb derselben Box: Plätze tauschen). Drop außerhalb der
-    // Boxen = aus der Box zurück auf die Bühne. Wirkt sofort auf die echten
-    // Fenster.
-    func dragEnded(_ info: WinInfo, at p: NSPoint, option: Bool = false) {
-        clearHover()
-        dragging = false
-        if let id = nearestBoxID(at: p) {
-            dropOnBox(info, onto: id, at: p, option: option)
-        } else if boxOwner(of: info) != nil {
-            demote(info)
-        }
-    }
-
-    // Gruppenkopf auf eine Box gezogen: die ersten zwei Fenster der App landen
-    // dort als Split, der bisherige Box-Inhalt geht zurück auf die Bühne.
-    func groupDragEnded(_ app: String, at p: NSPoint) {
-        clearHover()
-        dragging = false
-        guard let id = nearestBoxID(at: p) else { return }
-        let candidates = stage.filter { $0.app == app }
-        guard let anyC = candidates.first else { return }
-        // Floatende Apps: jedes Stück einzeln zentriert obendrauf, nie ins
-        // Split-Raster.
-        if cfg.isFloating(pid: anyC.pid, name: app) {
-            candidates.forEach { floatPlace($0, onto: id) }
-            return
-        }
-        let take = Array(candidates.prefix(2))
-        stage.removeAll { w in take.contains { $0.windowID == w.windowID } }
-        stage.insert(contentsOf: assigned[id] ?? [], at: 0)
-        assigned[id] = take
-        splitMode[id] = 0
-        crossMode[id] = 0
-        forcedVertical[id] = nil   // nicht Zonen-gesteuert: Monitor-Standardausrichtung
-        retile(id)
-        refreshStage()
-        take.forEach { pulseTile($0, in: id) }
-    }
-
-    private func dropOnBox(_ info: WinInfo, onto id: CGDirectDisplayID, at p: NSPoint, option: Bool = false) {
-        revive(info)
-        guard !cfg.isFloating(pid: info.pid, name: info.app) else {
-            floatPlace(info, onto: id)
-            return
-        }
-        let hitIdx = mapBoxes[id]?.dropSlot(atWindowPoint: p)
-
-        // ⌥-Drop auf eine Kachel: Fenster in deren Slot STAPELN (Tabs)
-        // statt das Raster wachsen zu lassen.
-        if option, let slot = hitIdx {
-            stackAdd(info, onto: id, slot: slot)
-            return
-        }
-
-        if let from = assigned[id]?.firstIndex(where: { $0.windowID == info.windowID }) {
-            // Innerhalb derselben Box: Plätze tauschen (zwei Fenster
-            // übereinander ziehen = sie tauschen die Position).
-            guard let hit = hitIdx, hit != from else { return }
-            model.swapInBox(id, from, hit)
-            retile(id)
+    // Klick auf eine Kachel verhält sich wie Enter (je nach Interaktionsmodell
+    // Loop-Modus oder Wechseln); Doppelklick nimmt immer den jeweils anderen Pfad.
+    func tileClicked(_ info: WinInfo) {
+        selectedID = info.windowID
+        if SettingsStore.shared.stageEnterSwitches {
+            focusAndClose(info)
         } else {
-            let existing = assigned[id] ?? []
-            if existing.count < Tuning.maxAssigned, let zone = mapBoxes[id]?.bentoZone(atWindowPoint: p) {
-                // An einen Rand/eine Ecke der Box gezogen: EXAKT dieselbe
-                // Routine wie Drag-to-Edge und Radial (BentoApply) auf die
-                // echten Fenster, danach das Modell aus der Realität nachziehen.
-                applyZone(zone, dragged: info, onto: id)
-            } else {
-                let sourceBox = model.dropFromOutside(info, onto: id, preferredSlot: hitIdx)
-                forcedVertical[id] = nil
-                retile(id)
-                if let sourceBox, sourceBox != id { retile(sourceBox) }
-                refreshStage()
-            }
+            openLoopMode(for: info)
         }
-        pulseTile(info, in: id)
     }
 
-    // Zonen-Drop im Overlay: die gemeinsame BentoApply-Routine positioniert die
-    // echten Fenster (gezogenes + bisheriger Box-Inhalt als Mitspieler) und
-    // registriert verbundene Ränder — identisch zu Drag-to-Edge und Radial.
-    // Danach wird das Modell aus dem Ergebnis nachgezogen: platzierte Fenster =
-    // neuer Box-Inhalt (frische Bounds; die Box zeichnet Kacheln aus echten
-    // Bounds, ein Einzel-Fenster an der Kante bleibt also halb), verdrängte
-    // zurück auf die Bühne. Kein dichter retile-Pfad, der die Hälfte wieder
-    // auf Vollfläche kacheln würde.
-    private func applyZone(_ zone: BentoZone, dragged info: WinInfo, onto id: CGDirectDisplayID) {
-        guard let d = displays.first(where: { $0.id == id }) else { return }
-        let existing = assigned[id] ?? []
-        let plan = BentoLayout.plan(zone: zone, othersAvailable: existing.count)
-        let sourceBox = removeEverywhere(info)
-        let ordered = BentoApply.apply(zone: zone, dragged: info.ax,
-                                       others: existing.map { $0.ax }, display: d)
-        // Ergebnis in WinInfos rückübersetzen (frische Bounds), Reihenfolge = Slots.
-        let pool = [info] + existing
-        var newAssigned: [WinInfo] = []
-        for ax in ordered {
-            guard let w = pool.first(where: { CFEqual($0.ax, ax) }) else { continue }
-            newAssigned.append(axFrame(ax).map { w.with(bounds: $0) } ?? w)
+    func tileDoubleClicked(_ info: WinInfo) {
+        selectedID = info.windowID
+        if SettingsStore.shared.stageEnterSwitches {
+            openLoopMode(for: info)
+        } else {
+            focusAndClose(info)
         }
-        assigned[id] = newAssigned
-        // Nicht platzierte bisherige Box-Fenster (z. B. bei 2er-Kante) -> Bühne.
-        let placed = Set(newAssigned.map { $0.windowID })
-        stage.insert(contentsOf: existing.filter { !placed.contains($0.windowID) }, at: 0)
-        splitMode[id] = 0
-        crossMode[id] = 0
-        forcedVertical[id] = plan.vertical
-        refreshBox(id)
-        if let sourceBox, sourceBox != id { retile(sourceBox) }
+    }
+
+    // MARK: Fenster-Aktionen auf der Bühne (⌘M/⌘H/⌘⌫ + Kontextmenü)
+
+    private func minimizeFromStage(_ info: WinInfo) {
+        axSetMinimized(info.ax, true)
+        touchedIDs.insert(info.windowID)
+        if let i = allWins.firstIndex(where: { $0.windowID == info.windowID }) {
+            allWins[i].minimized = true
+        }
         refreshStage()
     }
 
-    private func demote(_ info: WinInfo) {
-        guard let sourceBox = model.demote(info) else { return }
-        retile(sourceBox)
+    private func hideFromStage(_ info: WinInfo) {
+        hiddenPids.insert(info.pid)
+        NSRunningApplication(processIdentifier: info.pid)?.hide()
+        touchedIDs.insert(info.windowID)
         refreshStage()
-        (stageView?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
     }
 
-    // Entfernt das Fenster überall und liefert die Box zurück, in der es war.
-    @discardableResult
-    private func removeEverywhere(_ info: WinInfo) -> CGDirectDisplayID? {
-        model.removeEverywhere(info.windowID)
+    // Rechtsklick auf eine Kachel: die wichtigsten Aktionen ohne Loop-Umweg.
+    func tileMenu(for info: WinInfo) -> NSMenu {
+        selectedID = info.windowID
+        updateSelectionUI()
+        let menu = NSMenu()
+        func item(_ title: String, _ action: Selector) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.target = self
+            it.representedObject = NSNumber(value: info.windowID)
+            return it
+        }
+        menu.addItem(item("Fokussieren", #selector(menuFocus(_:))))
+        menu.addItem(item("Positionieren (Loop-Modus)", #selector(menuLoop(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Minimieren", #selector(menuMinimize(_:))))
+        menu.addItem(item("App ausblenden", #selector(menuHide(_:))))
+        menu.addItem(.separator())
+        menu.addItem(item("Fenster schließen", #selector(menuClose(_:))))
+        menu.addItem(item("App beenden", #selector(menuQuit(_:))))
+        return menu
     }
 
-    // MARK: Klicks
-
-    // Klick auf eine Bühnen-Kachel (fromStage) ODER ein Bühnen-Fenster in der
-    // Karte (Geist): Fenster nach vorn holen und Overlay schließen
-    // (Switcher-Verhalten). Klick auf eine echte Box-Kachel: ein Prinzip für
-    // alle Layouts — jeder Klick macht das angeklickte Fenster prominenter,
-    // ist es schon maximal, setzt der Klick auf ausgewogen zurück. Stufen:
-    // 1. eigene Seite groß (Hauptachse), 2. innerhalb der Seite groß
-    // (Querachse, nur 3er/2x2), 3. alles zurück auf 50/50.
-    func tileClicked(_ info: WinInfo, fromStage: Bool = false) {
-        selectedID = info.windowID   // Maus-Klick zieht auch den Tastatur-Ring mit
-        // Bühnen-Kachel schaltet immer zum Fenster — auch wenn dasselbe
-        // Fenster zusätzlich oben in der Karte zugeordnet ist. Nur ein Klick
-        // direkt auf die Box-Kachel eines zugeordneten Fensters cyclt das Ratio.
-        if fromStage || stage.contains(where: { $0.windowID == info.windowID }) {
-            revive(info)
-            axFocus(info.ax)
-            close()
-            return
-        }
-        for (id, arr) in assigned {
-            guard arr.count >= 2, let idx = arr.firstIndex(where: { $0.windowID == info.windowID }) else { continue }
-            let next = ArrangementModel.clickCycle(count: arr.count, idx: idx,
-                                                   main: splitMode[id] ?? 0, cross: crossMode[id] ?? 0)
-            splitMode[id] = next.main
-            crossMode[id] = next.cross
-            retile(id)
-            return
-        }
+    private func menuTarget(_ sender: NSMenuItem) -> WinInfo? {
+        guard let n = sender.representedObject as? NSNumber else { return nil }
+        return allWins.first { $0.windowID == CGWindowID(n.uint32Value) }
     }
 
-    // Fugen-Drag in einer Box: eingerastete Stufe (33/50/67) für Haupt- bzw.
-    // Querachse übernehmen; kachelt beim Stufenwechsel live die echten Fenster.
-    func seamChanged(_ id: CGDirectDisplayID, kind: SeamKind, mode: Int) {
-        switch kind {
-        case .main:
-            guard (splitMode[id] ?? 0) != mode else { return }
-            splitMode[id] = mode
-        case .cross:
-            guard (crossMode[id] ?? 0) != mode else { return }
-            crossMode[id] = mode
-        }
-        retile(id)
+    @objc private func menuFocus(_ sender: NSMenuItem) { if let w = menuTarget(sender) { focusAndClose(w) } }
+    @objc private func menuLoop(_ sender: NSMenuItem) { if let w = menuTarget(sender) { openLoopMode(for: w) } }
+    @objc private func menuMinimize(_ sender: NSMenuItem) { if let w = menuTarget(sender) { minimizeFromStage(w) } }
+    @objc private func menuHide(_ sender: NSMenuItem) { if let w = menuTarget(sender) { hideFromStage(w) } }
+    @objc private func menuClose(_ sender: NSMenuItem) { if let w = menuTarget(sender) { closeRequested(w) } }
+    @objc private func menuQuit(_ sender: NSMenuItem) {
+        guard let w = menuTarget(sender) else { return }
+        NSRunningApplication(processIdentifier: w.pid)?.terminate()
+        allWins.removeAll { $0.pid == w.pid }
+        if let sel = selectedID, !allWins.contains(where: { $0.windowID == sel }) { selectedID = nil }
+        refreshStage()
     }
 
     // X-Knopf einer Kachel: echtes Fenster schließen (drückt dessen roten
-    // Schließen-Knopf — die App darf also noch "Sichern?" fragen) und aus
-    // Karte/Bühne entfernen; verbleibende Box-Fenster ordnen sich neu.
+    // Schließen-Knopf — die App darf also noch "Sichern?" fragen) und von der
+    // Bühne entfernen.
     func closeRequested(_ info: WinInfo) {
         hidePreview()
         axClose(info.ax)
         allWins.removeAll { $0.windowID == info.windowID }
-        let sourceBox = removeEverywhere(info)
-        if let sourceBox { retile(sourceBox) }
+        WindowHistory.shared.forget(info.windowID)
+        touchedIDs.remove(info.windowID)
+        stashed.removeValue(forKey: info.windowID)
+        if selectedID == info.windowID { selectedID = nil }
         refreshStage()
-        // Das Schließen läuft asynchron, und manche Apps ordnen danach ihre
-        // übrigen Fenster selbst um — der sofortige Bounds-Readback oben ist
-        // dann schon wieder veraltet. Nach kurzer Frist nochmal kacheln und
-        // den echten Zustand in die Vorschau lesen.
-        guard let sourceBox else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self, self.window != nil else { return }
-            self.retile(sourceBox)
-        }
     }
 
-    // MARK: Tab-Stapel
+    // MARK: Loop-Modus
 
-    // Fenster in den Stapel eines Slots legen (⌥-Drop). Der Slot behält sein
-    // Raster-Fenster; alle Stapel-Mitglieder teilen sich dessen Fläche unter
-    // einer Tab-Leiste.
-    private func stackAdd(_ info: WinInfo, onto id: CGDirectDisplayID, slot: Int) {
+    // Öffnet den Ring fürs gegebene Fenster: die ganze Bühne (das komplette
+    // Overlay-Fenster) verschwindet, sichtbar bleibt NUR der Ring (eigenes
+    // schwebendes Panel) + die Live-Vorschau. Das Overlay-Fenster selbst
+    // bleibt aber Key-Fenster (nur unsichtbar) — sonst würde die Tastatur
+    // (↵/Esc/Legende) nicht mehr ankommen. Ein globaler Mausmonitor (wie
+    // DragSnap, öffentliche API, nur Lesezugriff) treibt Ring + Vorschau an,
+    // weil der Zeiger die meiste Zeit nicht über dem kleinen Ring liegt.
+    private func openLoopMode(for info: WinInfo?) {
+        guard loopMenuView == nil else { return }   // nie doppelt (Timer/Panel würden überschrieben, ohne die alten aufzuräumen)
+        guard let info, let d = display(for: info) else { return }
         revive(info)
-        removeEverywhere(info)
-        var st = stacks[id] ?? TabStack(slot: slot, extras: [])
-        st.slot = slot
-        st.extras.removeAll { $0.windowID == info.windowID }
-        st.extras.append(info)
-        stacks[id] = st
-        retile(id)
-        refreshStage()
-        if let t = mapBoxes[id]?.tiles.indices.contains(slot) == true ? mapBoxes[id]?.tiles[slot] : nil { t.pulse() }
-    }
+        selectionHighlight?.hide()   // die Loop-Vorschau übernimmt die Anzeige
+        loopTarget = info
+        loopAnchorDisplay = d
+        window?.contentView?.isHidden = true
 
-    // Ganzer Monitor als Tab-Stapel: ein Fenster füllt die Fläche, alle
-    // anderen stapeln sich dahinter, die Leiste schaltet um.
-    func enableTabMode(_ id: CGDirectDisplayID) {
-        let arr = assigned[id] ?? []
-        let ghosts = ghostWins(for: id).filter { !isFloatingWin($0) }
-        guard let first = arr.first ?? ghosts.first else { return }
-        var extras = Array(arr.dropFirst()) + (stacks[id]?.extras ?? [])
-        extras += ghosts.filter { g in g.windowID != first.windowID && !extras.contains { $0.windowID == g.windowID } }
-        stage.removeAll { w in extras.contains { $0.windowID == w.windowID } || w.windowID == first.windowID }
-        assigned[id] = [first]
-        splitMode[id] = 0
-        crossMode[id] = 0
-        stacks[id] = TabStack(slot: 0, extras: extras)
-        retile(id)
-        refreshStage()
-    }
-
-    // Stapel auflösen: Extras zurück auf die Bühne, Leiste weg.
-    func disableTabMode(_ id: CGDirectDisplayID) {
-        guard let st = stacks[id] else { return }
-        stacks[id] = nil
-        TabBars.shared.remove(id)
-        stage.append(contentsOf: st.extras)
-        retile(id)
-        refreshStage()
-    }
-
-    // Rechtsklick direkt auf eine Kachel: Menü der Box, der sie zugeordnet
-    // ist (Kacheln füllen fast die ganze Box, das ist der Normalfall).
-    // Bühnen-Kacheln (kein boxOwner) haben keinen Modus-Menüpunkt.
-    func modeMenu(forTileOwning info: WinInfo) -> NSMenu? {
-        guard let id = boxOwner(of: info) else { return nil }
-        return modeMenu(for: id)
-    }
-
-    // Rechtsklick auf eine Monitor-Box (oder eine Kachel darin): Modus wählen.
-    func modeMenu(for id: CGDirectDisplayID) -> NSMenu {
-        let menu = NSMenu()
-        let tabbed = stacks[id] != nil
-        let t = NSMenuItem(title: "Tab-Modus (alle Fenster stapeln)", action: #selector(menuEnableTabs(_:)), keyEquivalent: "")
-        t.target = self
-        t.representedObject = NSNumber(value: id)
-        t.state = tabbed ? .on : .off
-        menu.addItem(t)
-        let sp = NSMenuItem(title: "Split-Modus (Stapel auflösen)", action: #selector(menuDisableTabs(_:)), keyEquivalent: "")
-        sp.target = self
-        sp.representedObject = NSNumber(value: id)
-        sp.state = tabbed ? .off : .on
-        menu.addItem(sp)
-        return menu
-    }
-
-    @objc private func menuEnableTabs(_ sender: NSMenuItem) {
-        guard let n = sender.representedObject as? NSNumber else { return }
-        enableTabMode(CGDirectDisplayID(n.uint32Value))
-    }
-
-    @objc private func menuDisableTabs(_ sender: NSMenuItem) {
-        guard let n = sender.representedObject as? NSNumber else { return }
-        disableTabMode(CGDirectDisplayID(n.uint32Value))
-    }
-
-    // Stapel auf die echten Fenster anwenden: alle Mitglieder bekommen die
-    // Slot-Fläche unterhalb der Tab-Leiste; verwaiste Stapel lösen sich auf.
-    private func applyStack(_ id: CGDirectDisplayID) {
-        guard var st = stacks[id] else { return }
-        st.extras.removeAll { axFrame($0.ax) == nil }   // tote Fenster raus
-        let arr = assigned[id] ?? []
-        guard !arr.isEmpty, !st.extras.isEmpty else {
-            if !st.extras.isEmpty { stage.append(contentsOf: st.extras) }
-            stacks[id] = nil
-            TabBars.shared.remove(id)
-            return
+        let menu = LoopMenuView()
+        menu.configure(.init(target: info, display: d, displays: displays))
+        menu.onPreview = { [weak self] rect in
+            guard let self else { return }
+            guard let rect else { self.previewPanel?.hide(); return }
+            if self.previewPanel == nil { self.previewPanel = LoopPreviewPanel() }
+            self.previewPanel?.show(quartzRect: rect)
         }
-        st.slot = min(st.slot, arr.count - 1)
-        stacks[id] = st
-        let base = arr[st.slot].bounds
-        let content = CGRect(x: base.minX, y: base.minY + TabBars.barHeight,
-                             width: base.width, height: base.height - TabBars.barHeight)
+        menu.onCommit = { [weak self] action in self?.applyLoopAction(action, to: info) }
+        menu.onCancel = { [weak self] in self?.closeLoopMode() }
+        menu.onAnchorChange = { [weak self] d in
+            self?.loopAnchorDisplay = d
+            self?.repositionRingPanel(on: d)
+        }
+        loopMenuView = menu
+
+        let panel = LoopRingPanel()
+        // Klick irgendwo auf dem Anker-Monitor = Commit (Fang übers eigene
+        // Catcher-Fenster; ein Global-Monitor würde eigene App-Events nie sehen).
+        panel.onClick = { [weak self] in self?.loopMouseCommit() }
+        loopRingPanel = panel
+        repositionRingPanel(on: d)
+
+        // .common-Mode: der Default-Mode pausiert während Tracking-Loops
+        // (Menüs, Drags) — der Ring soll auch dann weiter der Maus folgen.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.loopMouseMoved()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        loopMouseTimer = timer
+        loopMouseMoved()   // sofort mit der aktuellen Mausposition befüllen, nicht erst beim ersten Timer-Tick
+    }
+
+    private func closeLoopMode() {
+        stopLoopTracking()
+        loopMenuView = nil
+        window?.contentView?.isHidden = false
+        updateFooter()
+        updateSelectionUI()   // Markierung ums (weiterhin gewählte) Fenster wieder einblenden
+    }
+
+    private func stopLoopTracking() {
+        loopMouseTimer?.invalidate()
+        loopMouseTimer = nil
+        lastPolledMouseLocation = nil
+        loopRingPanel?.hide()
+        loopRingPanel = nil
+        previewPanel?.hide()
+        previewPanel = nil
+        loopTarget = nil
+        loopAnchorDisplay = nil
+    }
+
+    // Klick irgendwo (nicht nur auf den Ring) bestätigt die aktuell gewählte
+    // Position — genau wie ↵, nur mit der Maus statt der Tastatur.
+    private func loopMouseCommit() {
+        guard let info = loopTarget, let action = loopMenuView?.current else { return }
+        applyLoopAction(action, to: info)
+    }
+
+    private func repositionRingPanel(on d: Display) {
+        guard let menu = loopMenuView else { return }
+        loopRingPanel?.show(menu, on: d)
+    }
+
+    // Globale Mausposition -> Zone/Variante, ohne Kreis-Zwang: es reicht,
+    // irgendwo im passenden Quadranten um den Monitor-Mittelpunkt zu sein
+    // (wie bei Loop). Liegt der Zeiger auf einem ANDEREN Monitor als dem
+    // aktuellen Anker, "folgt" der Ring dorthin — so wechselt man per Maus
+    // den Zielmonitor fürs Fenster.
+    private func loopMouseMoved() {
+        guard let d0 = loopAnchorDisplay else { return }
+        let mouse = NSEvent.mouseLocation
+        if let last = lastPolledMouseLocation, hypot(mouse.x - last.x, mouse.y - last.y) < 1 { return }
+        lastPolledMouseLocation = mouse
+        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        let q = CGPoint(x: mouse.x, y: primaryH - mouse.y)   // AppKit unten-links -> Quartz oben-links
+        if let hitID = displayID(containing: q, in: displays), hitID != d0.id,
+           let d = displays.first(where: { $0.id == hitID }) {
+            loopAnchorDisplay = d
+            loopMenuView?.updateDisplay(d)
+            repositionRingPanel(on: d)
+        }
+        guard let anchor = loopAnchorDisplay else { return }
+        let center = CGPoint(x: anchor.visible.midX, y: anchor.visible.midY)
+        let dx = q.x - center.x, dy = q.y - center.y
+        let dist = hypot(dx, dy)
+        guard dist > 4 else { return }   // Totzone exakt im Zentrum
+        var angle = atan2(-dy, dx)        // Quartz: +y runter -> für Standard-Winkel invertieren
+        if angle < 0 { angle += 2 * .pi }
+        var idx = Int(((angle + .pi / 8) / (.pi / 4)).rounded(.down)) % 8
+        idx = (8 - idx) % 8
+        let zone = LoopMenuView.zones[idx]
+        let variant: EdgeVariant
+        switch zone {
+        case .left, .right, .top, .bottom:
+            let refDist = min(anchor.visible.width, anchor.visible.height) / 2
+            let t = min(dist / max(refDist, 1), 1)
+            variant = t < 0.33 ? .third : (t < 0.66 ? .half : .twoThirds)
+        case .topLeft, .topRight, .bottomLeft, .bottomRight:
+            variant = .half
+        }
+        loopMenuView?.mouseUpdate(zone: zone, variant: variant)
+    }
+
+    // Die eine Anwendungsroutine für den Loop-Modus: setzt EIN Fenster real
+    // um (solo — außer der Nutzer hat "mit Nachbarn kacheln" für Hälften/
+    // Viertel eingeschaltet, dann via BentoApply wie Drag-to-Edge/Radial).
+    private func applyLoopAction(_ action: LoopAction, to info: WinInfo) {
+        // Nach dem Anwenden zurück aufs volle Board: closeLoopMode() blendet
+        // die Bühne wieder ein, setSearch("") löscht den Filter UND ruft
+        // dabei refreshStage() bereits mit auf — kein separater Aufruf nötig.
+        // zRank frisch lesen: Commits heben Fenster an, sonst arbeiten
+        // Bühnen-Sortierung und unraiseIfNeeded mit der Ordnung von vorher.
+        defer {
+            closeLoopMode()
+            refreshAllBounds()
+            zRank = appWM.zOrderRank()
+            setSearch("")
+        }
+        guard let d = loopAnchorDisplay, let currentFrame = axFrame(info.ax) else { return }
+        WindowHistory.shared.recordIfNeeded(info.windowID, currentFrame: currentFrame)
+        touchedIDs.insert(info.windowID)
         LinkedEdges.shared.suppress()
-        axSetFrame(arr[st.slot].ax, content)
-        for w in st.extras { axSetFrame(w.ax, content) }
-        TabBars.shared.update(displayID: id, slotQuartzRect: base,
-                              wins: [arr[st.slot]] + st.extras, active: arr[st.slot].windowID)
-    }
+        var finalDisplay = d   // .throwToDisplay/.switchDisplay ändern das Ziel unten
 
-    // MARK: Anwenden
-
-    // Wendet den aktuellen Box-Inhalt eines Monitors sofort auf die echten
-    // Fenster an und liest die tatsächlichen Bounds zurück.
-    private func retile(_ id: CGDirectDisplayID) {
-        guard let d = displays.first(where: { $0.id == id }) else { return }
-        let wins = assigned[id] ?? []
-        let vOverride = forcedVertical[id]
-        if !wins.isEmpty {
-            LinkedEdges.shared.suppress()
-            appWM.tileGroup(wins.map { $0.ax }, on: d, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
-                            verticalOverride: vOverride)
-            let fresh = wins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
-            // Thumbnails umgroßter Fenster sofort verwerfen — schnelle Apps
-            // haben ihre neuen Bounds schon jetzt, und syncBounds würde die
-            // Invalidierung dann nicht mehr auslösen.
-            for (f, w) in zip(fresh, wins) where f.bounds.size != w.bounds.size {
-                ThumbnailCache.shared.remove(f.windowID)
-            }
-            assigned[id] = fresh
-            // Verbundene Ränder: Gruppe für Live-Folgen registrieren.
-            LinkedEdges.shared.track(displayID: id, display: d, wins: wins.map { $0.ax },
-                                     mainR: Layout.ratio(splitMode[id] ?? 0),
-                                     crossR: Layout.ratio(crossMode[id] ?? 0), vertical: vOverride)
+        // Rand-verankerte Aktion solo setzen und — falls "mit Nachbarn
+        // kacheln" an ist — die Restfläche (Bildschirm minus dieses Fenster)
+        // mit bis zu 3 anderen Fenstern füllen (insgesamt max. 4, wie
+        // BentoLayout). Nur für Zonen sinnvoll, deren Rest ein einzelnes
+        // Rechteck ist (siehe LoopEngine.remainder) — zentrierte Aktionen
+        // rufen das gar nicht erst auf, siehe .extra unten.
+        func fillEdge(_ zone: BentoZone, frame: CGRect) {
+            axSetFrame(info.ax, frame)
+            axRaise(info.ax)
+            guard SettingsStore.shared.loopFillNeighbors else { return }
+            let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+            guard !others.isEmpty else { return }
+            let toPlace = Array(others.prefix(3))
+            let rest = LoopEngine.remainder(of: frame, in: d.visible, edge: zone)
+            let vertical = rest.height > rest.width
+            let frames = Layout.frames(visible: rest, vertical: vertical, count: toPlace.count, split: 0)
+            for (w, f) in zip(toPlace, frames) { axSetFrame(w.ax, f) }
         }
-        refreshBox(id)
-    }
 
-    // View-Auffrischung + verzögerter Bounds-Sync, OHNE selbst Frames zu
-    // setzen. Von retile (nach tileGroup) UND vom Zonen-Drop (nach BentoApply)
-    // genutzt — so teilen der dichte Pfad und der Zonen-Pfad denselben
-    // Nachlauf, statt ihn zu duplizieren.
-    private func refreshBox(_ id: CGDirectDisplayID) {
-        applyStack(id)
-        mapBoxes[id]?.setAssigned(assigned[id] ?? [], split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
-                                  ghosts: ghostWins(for: id), verticalOverride: forcedVertical[id])
-        updateSelectionUI()
-        // Manche Apps (v.a. Electron wie Teams) wenden das Setzen verzögert
-        // an — der sofortige Readback zeigt dann noch alte Bounds. Später den
-        // echten Zustand nachlesen (nur lesen, nicht erneut setzen) und die
-        // Vorschau korrigieren; zweiter Durchgang für ganz träge Kandidaten.
-        for delay in [0.4, 1.2] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.window != nil else { return }
-                self.syncBounds(id)
+        switch action {
+        case .edge(let zone, let variant):
+            fillEdge(zone, frame: LoopEngine.frame(zone: zone, variant: variant, in: d.visible))
+        case .corner(let zone, let variant):
+            // Bento-Nachbar-Kacheln nur bei der 50/50-Ecke (BentoLayout kennt
+            // keine ⅓/⅔-Ecken) — gecyclte Varianten immer solo.
+            if SettingsStore.shared.loopFillNeighbors, variant == .half {
+                let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+                BentoApply.apply(zone: zone, dragged: info.ax, others: others.map { $0.ax }, display: d)
+            } else {
+                axSetFrame(info.ax, LoopEngine.frame(zone: zone, variant: variant, in: d.visible))
+                axRaise(info.ax)
             }
+        case .general(let a):
+            axSetFrame(info.ax, LoopEngine.generalFrame(a, in: d.visible, current: currentFrame))
+            axRaise(info.ax)
+        case .extra(let z):
+            let frame = LoopEngine.extraFrame(z, in: d.visible)
+            if let edge = z.edgeAnchor {
+                fillEdge(edge, frame: frame)
+            } else {
+                axSetFrame(info.ax, frame)
+                axRaise(info.ax)
+            }
+        case .hide:
+            hiddenPids.insert(info.pid)   // für vollständigen Escape-Revert
+            NSRunningApplication(processIdentifier: info.pid)?.hide()
+        case .minimize:
+            axSetMinimized(info.ax, true)
+        case .minimizeOthers:
+            for other in appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg) {
+                axSetMinimized(other.ax, true)
+            }
+        case .stash:
+            let edge = LoopEngine.nearestEdge(of: currentFrame, in: d.visible)
+            stashed[info.windowID] = (frame: currentFrame, edge: edge)
+            axSetFrame(info.ax, LoopEngine.stashFrame(currentFrame, edge: edge, in: d.visible))
+        case .unstash:
+            if let saved = stashed.removeValue(forKey: info.windowID) {
+                revive(info)   // falls zwischenzeitlich minimiert
+                axSetFrame(info.ax, saved.frame)
+                axRaise(info.ax)
+            }
+        case .undo:
+            if let f = WindowHistory.shared.undoFrame(info.windowID) {
+                axSetFrame(info.ax, f)
+                axRaise(info.ax)
+            }
+        case .throwToDisplay(let idx):
+            guard displays.indices.contains(idx) else { break }
+            // Quelle = Monitor unterm ECHTEN aktuellen Frame — nicht der Anker,
+            // der per Ziffer/⇥ schon aufs Ziel gesprungen ist (from==to ergäbe
+            // eine an den Rand geklemmte Fehlposition statt proportionalem Übertrag).
+            let sourceID = displayID(containing: CGPoint(x: currentFrame.midX, y: currentFrame.midY), in: displays)
+            let source = displays.first(where: { $0.id == sourceID }) ?? d
+            axSetFrame(info.ax, LoopEngine.proportionalFrame(currentFrame, from: source, to: displays[idx]))
+            axRaise(info.ax)
+            finalDisplay = displays[idx]
+        }
+
+        // Verbundene Ränder auch für den Loop-Solo-Pfad anmelden (nicht nur
+        // BentoApply): welche Fenster GENAU JETZT wirklich danebenliegen,
+        // bestimmt LinkedEdges bei jedem Resize ohnehin live neu — ein
+        // Fenster zu beobachten, das gar nicht angrenzt, hat keinen Nachteil.
+        // Fokus NICHT sofort setzen (axFocus aktiviert die App → Overlay
+        // verliert Key → Session-Abriss statt "zurück auf die Bühne") —
+        // stattdessen fürs Session-Ende vormerken, siehe close().
+        switch action {
+        case .hide, .minimize, .minimizeOthers, .stash:
+            break
+        default:
+            lastCommitted = info
+            let others = appWM.otherWindows(on: finalDisplay, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+            LinkedEdges.shared.track([info.ax] + others.map { $0.ax })
         }
     }
 
-    // Bounds der zugeordneten Fenster aus der Realität nachlesen und die
-    // Box-Vorschau aktualisieren — ohne Frames neu zu setzen.
-    private func syncBounds(_ id: CGDirectDisplayID) {
-        let wins = assigned[id] ?? []
-        guard !wins.isEmpty else { return }
-        let fresh = wins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
-        let changed = zip(fresh, wins).filter { $0.bounds != $1.bounds }.map { $0.0.windowID }
-        guard !changed.isEmpty else { return }
-        // Alte Thumbnails der umgroßten Fenster verwerfen — sonst zeigt die
-        // neue Kachel den Abzug von VOR dem Kacheln (falsche Größe/Proportion).
-        changed.forEach { ThumbnailCache.shared.remove($0) }
-        assigned[id] = fresh
-        mapBoxes[id]?.setAssigned(fresh, split: splitMode[id] ?? 0, cross: crossMode[id] ?? 0,
-                                  ghosts: ghostWins(for: id), verticalOverride: forcedVertical[id])
-        updateSelectionUI()
-    }
+    // MARK: Bühne
 
-    private func matchesSearch(_ w: WinInfo) -> Bool {
-        search.isEmpty || w.app.localizedCaseInsensitiveContains(search)
-            || w.title.localizedCaseInsensitiveContains(search)
-    }
-
-    // Die Bühne zeigt IMMER alle Fenster — nicht zugeordnete UND zugeordnete
-    // (die zusätzlich oben in der Karte liegen). So ist die Liste vollständig
-    // und eindeutig, statt dass manche Fenster nur oben, manche nur unten
-    // auftauchen. Z-sortiert für stabile App-Gruppierung; Duplikate über
-    // windowID ausgeschlossen (ein Fenster, das gleichzeitig in Stapel + Karte
-    // wäre, erscheint nur einmal).
+    // Alle verwalteten Fenster, Z-sortiert für stabile App-Gruppierung.
     private func stageList() -> [WinInfo] {
-        let assignedAll = displays.flatMap { assigned[$0.id] ?? [] }
-        let stacked = stacks.values.flatMap { $0.extras }   // in Tab-Stapeln versteckte
-        var seen = Set<CGWindowID>()
-        let combined = (assignedAll + stacked + stage).filter { seen.insert($0.windowID).inserted }
-        return combined.sorted { (zRank[$0.windowID] ?? .max) < (zRank[$1.windowID] ?? .max) }
+        allWins.sorted { (zRank[$0.windowID] ?? .max) < (zRank[$1.windowID] ?? .max) }
+    }
+
+    // Bounds aller Fenster aus der Realität nachlesen — nach jeder Loop-Aktion,
+    // damit die Bühne (Thumbnails, Farbpunkt) den echten Zustand zeigt.
+    private func refreshAllBounds() {
+        allWins = allWins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
     }
 
     private func refreshStage() {
         guard let stageV = stageView else { return }
         stageV.setWindows(stageList(), filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
-        // Geister-Kacheln folgen dem Bühnen-Inhalt (z. B. nach Zuordnen/Lösen).
-        for d in displays {
-            mapBoxes[d.id]?.setAssigned(assigned[d.id] ?? [], split: splitMode[d.id] ?? 0, cross: crossMode[d.id] ?? 0,
-                                        ghosts: ghostWins(for: d.id), verticalOverride: forcedVertical[d.id])
-        }
         resizeToFitStage()
         updateSelectionUI()
     }
 
     // Fensterhöhe folgt dem Bühnen-Inhalt (Oberkante bleibt fix) — kein toter
-    // Leerraum unter der Bühne, kein Abschneiden nach Demotes.
+    // Leerraum unter der Bühne, kein Abschneiden nach dem Schließen von Fenstern.
     private func resizeToFitStage() {
         guard let win = window, let stageV = stageView else { return }
         let newH = min(fixedTopHeight + stageV.frame.height + 18 + 28, maxContentHeight)
@@ -1216,10 +954,5 @@ final class OverlayController: NSObject, NSWindowDelegate {
         f.origin.y = topY - newH
         win.setFrame(f, display: true, animate: true)
         win.invalidateShadow()
-    }
-
-    private func pulseTile(_ info: WinInfo, in id: CGDirectDisplayID) {
-        (mapBoxes[id]?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
-        (stageView?.tiles.first { $0.info.windowID == info.windowID })?.pulse()
     }
 }

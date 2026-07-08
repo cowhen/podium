@@ -2,21 +2,74 @@ import AppKit
 import Carbon.HIToolbox
 
 // Direkt-Hotkeys ohne Overlay (der Rectangle-Kern): wirken sofort auf das
-// fokussierte Fenster der vordersten App. ⌃⌥← / ⌃⌥→ = linke/rechte Hälfte
-// (bzw. obere/untere auf Hochkant-Monitoren), ⌃⌥↑ = maximieren,
-// ⌃⌥↓ = zentrieren, ⌃⌥1–4 = auf Monitor N werfen (Größe bleibt, geklemmt).
+// fokussierte Fenster der vordersten App. Jede Aktion ist frei belegbar
+// (Einstellungen → Hotkeys); die klassischen ⌃⌥-Kürzel sind die
+// Werks-Defaults. Frames kommen aus LoopEngine — dieselbe Mathematik wie im
+// Loop-Modus, keine zweite Layout-Logik.
 enum DirectActions {
+    struct Action {
+        let key: String          // UserDefaults-Schlüssel ("direct.<key>")
+        let name: String         // Anzeige in den Einstellungen
+        let defaultBinding: (keyCode: UInt32, mods: UInt32, label: String)?
+        let run: () -> Void
+    }
+
+    // Feste, kuratierte Reihenfolge — Index bestimmt die HotKeyCenter-ID (100+i).
+    static let actions: [Action] = {
+        let cO = UInt32(controlKey | optionKey)
+        func edge(_ zone: BentoZone, _ variant: EdgeVariant) -> () -> Void {
+            { applyFrame { d, _ in LoopEngine.frame(zone: zone, variant: variant, in: d.visible) } }
+        }
+        func general(_ a: GeneralAction) -> () -> Void {
+            { applyFrame { d, f in LoopEngine.generalFrame(a, in: d.visible, current: f) } }
+        }
+        return [
+            Action(key: "leftHalf", name: "Linke Hälfte",
+                   defaultBinding: (UInt32(kVK_LeftArrow), cO, "⌃⌥←"), run: edge(.left, .half)),
+            Action(key: "rightHalf", name: "Rechte Hälfte",
+                   defaultBinding: (UInt32(kVK_RightArrow), cO, "⌃⌥→"), run: edge(.right, .half)),
+            Action(key: "topHalf", name: "Obere Hälfte", defaultBinding: nil, run: edge(.top, .half)),
+            Action(key: "bottomHalf", name: "Untere Hälfte", defaultBinding: nil, run: edge(.bottom, .half)),
+            Action(key: "leftThird", name: "Linkes Drittel", defaultBinding: nil, run: edge(.left, .third)),
+            Action(key: "rightThird", name: "Rechtes Drittel", defaultBinding: nil, run: edge(.right, .third)),
+            Action(key: "leftTwoThirds", name: "Linke zwei Drittel", defaultBinding: nil, run: edge(.left, .twoThirds)),
+            Action(key: "rightTwoThirds", name: "Rechte zwei Drittel", defaultBinding: nil, run: edge(.right, .twoThirds)),
+            Action(key: "topLeft", name: "Ecke oben links", defaultBinding: nil, run: edge(.topLeft, .half)),
+            Action(key: "topRight", name: "Ecke oben rechts", defaultBinding: nil, run: edge(.topRight, .half)),
+            Action(key: "bottomLeft", name: "Ecke unten links", defaultBinding: nil, run: edge(.bottomLeft, .half)),
+            Action(key: "bottomRight", name: "Ecke unten rechts", defaultBinding: nil, run: edge(.bottomRight, .half)),
+            Action(key: "maximize", name: "Maximieren",
+                   defaultBinding: (UInt32(kVK_UpArrow), cO, "⌃⌥↑"), run: general(.maximize)),
+            Action(key: "almostMaximize", name: "Fast maximieren", defaultBinding: nil, run: general(.almostMaximize)),
+            Action(key: "center", name: "Zentrieren",
+                   defaultBinding: (UInt32(kVK_DownArrow), cO, "⌃⌥↓"), run: general(.center)),
+            Action(key: "maxHeight", name: "Volle Höhe", defaultBinding: nil, run: general(.maximizeHeight)),
+            Action(key: "maxWidth", name: "Volle Breite", defaultBinding: nil, run: general(.maximizeWidth)),
+            Action(key: "undo", name: "Rückgängig (Ursprungsgröße)", defaultBinding: nil, run: { undoFrame() }),
+            Action(key: "display1", name: "Auf Monitor 1 werfen",
+                   defaultBinding: (UInt32(kVK_ANSI_1), cO, "⌃⌥1"), run: { throwToDisplay(0) }),
+            Action(key: "display2", name: "Auf Monitor 2 werfen",
+                   defaultBinding: (UInt32(kVK_ANSI_2), cO, "⌃⌥2"), run: { throwToDisplay(1) }),
+            Action(key: "display3", name: "Auf Monitor 3 werfen",
+                   defaultBinding: (UInt32(kVK_ANSI_3), cO, "⌃⌥3"), run: { throwToDisplay(2) }),
+            Action(key: "display4", name: "Auf Monitor 4 werfen",
+                   defaultBinding: (UInt32(kVK_ANSI_4), cO, "⌃⌥4"), run: { throwToDisplay(3) }),
+        ]
+    }()
+
+    // (Neu-)Registrierung aller belegten Bindings — auch nach Umbelegen in
+    // den Einstellungen aufrufbar (settingsChanged in main.swift).
     static func register() {
-        let mods = UInt32(controlKey | optionKey)
-        HotKeyCenter.shared.register(id: 10, keyCode: UInt32(kVK_LeftArrow), mods: mods) { halve(first: true) }
-        HotKeyCenter.shared.register(id: 11, keyCode: UInt32(kVK_RightArrow), mods: mods) { halve(first: false) }
-        HotKeyCenter.shared.register(id: 12, keyCode: UInt32(kVK_UpArrow), mods: mods) { maximize() }
-        HotKeyCenter.shared.register(id: 13, keyCode: UInt32(kVK_DownArrow), mods: mods) { center() }
-        let digits: [UInt32] = [UInt32(kVK_ANSI_1), UInt32(kVK_ANSI_2), UInt32(kVK_ANSI_3), UInt32(kVK_ANSI_4)]
-        for (i, code) in digits.enumerated() {
-            HotKeyCenter.shared.register(id: UInt32(20 + i), keyCode: code, mods: mods) { throwToDisplay(i) }
+        for (i, action) in actions.enumerated() {
+            let id = UInt32(100 + i)
+            HotKeyCenter.shared.unregister(id: id)
+            guard let b = SettingsStore.shared.directBinding(for: action.key) ?? action.defaultBinding,
+                  !SettingsStore.shared.directBindingCleared(action.key) else { continue }
+            HotKeyCenter.shared.register(id: id, keyCode: b.keyCode, mods: b.mods) { action.run() }
         }
     }
+
+    // MARK: Ziel-Fenster + Anwendung
 
     private static func focusedWindow() -> AXUIElement? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
@@ -32,31 +85,50 @@ enum DirectActions {
         return ds.first { $0.id == id }
     }
 
-    private static func halve(first: Bool) {
-        guard let w = focusedWindow(), let d = displayOf(w) else { return }
-        let frames = Layout.frames(visible: d.visible, vertical: d.vertical, count: 2, split: 0)
-        axSetFrame(w, first ? frames[0] : frames[1])
-    }
-
-    private static func maximize() {
-        guard let w = focusedWindow(), let d = displayOf(w) else { return }
-        axSetFrame(w, d.visible.insetBy(dx: Layout.gap, dy: Layout.gap))
-    }
-
-    private static func center() {
+    private static func applyFrame(_ compute: (Display, CGRect) -> CGRect) {
         guard let w = focusedWindow(), let d = displayOf(w), let f = axFrame(w) else { return }
-        axSetFrame(w, CGRect(x: d.visible.midX - f.width / 2, y: d.visible.midY - f.height / 2,
-                             width: f.width, height: f.height))
+        recordHistory(w, frame: f)
+        LinkedEdges.shared.suppress()
+        axSetFrame(w, compute(d, f))
+    }
+
+    private static func undoFrame() {
+        guard let w = focusedWindow(), let wid = windowID(of: w),
+              let f = WindowHistory.shared.undoFrame(wid) else { return }
+        LinkedEdges.shared.suppress()
+        axSetFrame(w, f)
     }
 
     private static func throwToDisplay(_ index: Int) {
         let ds = currentDisplays().sorted { $0.full.minX < $1.full.minX }
-        guard index < ds.count, let w = focusedWindow(), let f = axFrame(w) else { return }
-        let d = ds[index]
-        let width = min(f.width, d.visible.width - 2 * Layout.gap)
-        let height = min(f.height, d.visible.height - 2 * Layout.gap)
-        axSetFrame(w, CGRect(x: d.visible.midX - width / 2, y: d.visible.midY - height / 2,
-                             width: width, height: height))
+        guard index < ds.count, let w = focusedWindow(), let d0 = displayOf(w), let f = axFrame(w) else { return }
+        recordHistory(w, frame: f)
+        LinkedEdges.shared.suppress()
+        axSetFrame(w, LoopEngine.proportionalFrame(f, from: d0, to: ds[index]))
         axRaise(w)
+    }
+
+    private static func recordHistory(_ w: AXUIElement, frame: CGRect) {
+        guard let wid = windowID(of: w) else { return }
+        WindowHistory.shared.recordIfNeeded(wid, currentFrame: frame)
+    }
+
+    // CGWindowID des AX-Fensters über Bounds-Match (öffentliche API; die
+    // Zuordnung ist dieselbe Heuristik wie in WindowManager.collectWindows).
+    private static func windowID(of w: AXUIElement) -> CGWindowID? {
+        guard let f = axFrame(w) else { return nil }
+        let pid = axPid(w)
+        let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]]) ?? []
+        var best: (id: CGWindowID, dist: CGFloat)?
+        for e in list where (e[kCGWindowOwnerPID as String] as? pid_t) == pid {
+            guard let nd = e[kCGWindowBounds as String] as? NSDictionary,
+                  let r = CGRect(dictionaryRepresentation: nd),
+                  let wid = e[kCGWindowNumber as String] as? CGWindowID else { continue }
+            let dist = abs(r.minX - f.minX) + abs(r.minY - f.minY) + abs(r.width - f.width) + abs(r.height - f.height)
+            if best == nil || dist < best!.dist { best = (wid, dist) }
+        }
+        guard let best, best.dist < Tuning.axMatchMaxDistance else { return nil }
+        return best.id
     }
 }

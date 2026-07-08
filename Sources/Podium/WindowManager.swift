@@ -122,6 +122,21 @@ final class WindowManager {
             .sorted { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
     }
 
+    // Aktuell fokussiertes Fenster der vordersten (Nicht-Podium-)App, gematcht
+    // gegen bereits eingelesene WinInfos — konsolidiert den Lookup, der bisher
+    // in RadialMenu/DirectActions/DragSnap je einzeln dupliziert war.
+    func activeWindow(among wins: [WinInfo]) -> WinInfo? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier else { return nil }
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        if let focused = axCopy(axApp, kAXFocusedWindowAttribute as String),
+           let match = wins.first(where: { $0.pid == pid && CFEqual($0.ax, (focused as! AXUIElement)) }) {
+            return match
+        }
+        return wins.first { $0.pid == pid }
+    }
+
     // Pro Monitor nach echter Z-Order sortiert (vorderstes zuerst) — Startzustand
     // für die Zeilen im Overlay, bevor der Nutzer Fenster in die Karte zieht.
     func perMonitorOrder(displays: [Display], wins: [WinInfo], rank: [CGWindowID: Int]) -> [CGDirectDisplayID: [WinInfo]] {
