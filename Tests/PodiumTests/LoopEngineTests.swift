@@ -46,6 +46,68 @@ final class LoopEngineTests: XCTestCase {
         XCTAssertEqual(LoopEngine.remainder(of: tl, in: bounds, edge: .topLeft), bounds)
     }
 
+    func testAutoGridSingleCellFillsInsetArea() {
+        let frames = LoopEngine.autoGrid(count: 1, in: bounds)
+        XCTAssertEqual(frames, [CGRect(x: 8, y: 8, width: 984, height: 584)])
+    }
+
+    func testAutoGridTwoCellsSideBySideWithOneGap() {
+        // inner = (8,8,984,584); cellW = (984-8)/2 = 488
+        let frames = LoopEngine.autoGrid(count: 2, in: bounds)
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertEqual(frames[0], CGRect(x: 8, y: 8, width: 488, height: 584))
+        XCTAssertEqual(frames[1], CGRect(x: 504, y: 8, width: 488, height: 584))
+    }
+
+    func testAutoGridFourCellsFormATwoByTwoGrid() {
+        // cellW = (984-8)/2 = 488, cellH = (584-8)/2 = 288
+        let frames = LoopEngine.autoGrid(count: 4, in: bounds)
+        XCTAssertEqual(frames.count, 4)
+        XCTAssertEqual(frames[0], CGRect(x: 8, y: 8, width: 488, height: 288))
+        XCTAssertEqual(frames[1], CGRect(x: 504, y: 8, width: 488, height: 288))
+        XCTAssertEqual(frames[2], CGRect(x: 8, y: 304, width: 488, height: 288))
+        XCTAssertEqual(frames[3], CGRect(x: 504, y: 304, width: 488, height: 288))
+    }
+
+    func testAutoGridDropsCellsThatWouldFallBelowMinimumSize() {
+        // 9 Zellen in 1000x600 wären winzig — mit einer hohen Mindestgröße
+        // muss die Funktion auf weniger zurückfallen, nie kleiner liefern.
+        let frames = LoopEngine.autoGrid(count: 9, in: bounds, minEdge: 300)
+        XCTAssertLessThan(frames.count, 9)
+        for f in frames {
+            XCTAssertGreaterThanOrEqual(f.width, 300)
+            XCTAssertGreaterThanOrEqual(f.height, 300)
+        }
+    }
+
+    func testAutoGridReturnsEmptyForZeroCount() {
+        XCTAssertTrue(LoopEngine.autoGrid(count: 0, in: bounds).isEmpty)
+    }
+
+    func testAllocateByWeightSplitsEquallyForEqualWeights() {
+        XCTAssertEqual(LoopEngine.allocateByWeight(total: 4, weights: [100, 100]), [2, 2])
+    }
+
+    func testAllocateByWeightFavorsLargerWeight() {
+        // 3 Fenster auf einen doppelt so großen Monitor + einen kleinen: 2:1.
+        XCTAssertEqual(LoopEngine.allocateByWeight(total: 3, weights: [200, 100]), [2, 1])
+    }
+
+    func testAllocateByWeightSumsExactlyToTotalDespiteRounding() {
+        // 1.5/1.5 würde bei reinem Abrunden 1+1=2 statt 3 ergeben — der größte
+        // Rest muss den fehlenden Platz auffangen.
+        let counts = LoopEngine.allocateByWeight(total: 3, weights: [100, 100])
+        XCTAssertEqual(counts.reduce(0, +), 3)
+    }
+
+    func testAllocateByWeightDistributesEquallyWhenAllWeightsAreZero() {
+        XCTAssertEqual(LoopEngine.allocateByWeight(total: 5, weights: [0, 0]), [3, 2])
+    }
+
+    func testAllocateByWeightReturnsZerosForZeroTotal() {
+        XCTAssertEqual(LoopEngine.allocateByWeight(total: 0, weights: [100, 200]), [0, 0])
+    }
+
     func testEdgeThirdAndTwoThirds() {
         XCTAssertEqual(LoopEngine.frame(zone: .left, variant: .third, in: bounds).width, 328)
         XCTAssertEqual(LoopEngine.frame(zone: .left, variant: .twoThirds, in: bounds).width, 656)

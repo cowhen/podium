@@ -13,12 +13,14 @@ final class WindowTileView: NSView {
     private let imageView = NSImageView()
     private let appLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
+    private var checkButton: NSButton?
+    private var isChecked = false
 
     private let isGhost: Bool
 
     init(info: WinInfo, isVisible: Bool, controller: OverlayController, frame: NSRect,
          accent: NSColor = .controlAccentColor, dot: NSColor? = nil, floating: Bool = false,
-         isGhost: Bool = false) {
+         isGhost: Bool = false, checked: Bool = false) {
         self.info = info
         self.isVisible = isVisible
         self.accent = accent
@@ -55,10 +57,23 @@ final class WindowTileView: NSView {
             addSubview(titleLabel)
         }
 
+        // Auto-Arrange-Häkchen oben links (Leertaste toggelt dasselbe für die
+        // Tastatur-Auswahl) — der Monitor-Punkt rutscht dafür ein Stück nach rechts.
+        let check = NSButton(frame: NSRect(x: 3, y: bounds.height - 22, width: 18, height: 18))
+        check.isBordered = false
+        check.imagePosition = .imageOnly
+        check.target = self
+        check.action = #selector(checkTapped)
+        check.toolTip = "Für Auto-Arrange auswählen (Leertaste)"
+        addSubview(check)
+        checkButton = check
+        isChecked = checked
+        applyCheckState()
+
         if let dot {
             // NSView ist unten-links orientiert -> oben LINKS platzieren
             // (oben rechts sitzt der Schließen-Knopf).
-            let d = NSView(frame: NSRect(x: 7, y: bounds.height - 15, width: 8, height: 8))
+            let d = NSView(frame: NSRect(x: 29, y: bounds.height - 15, width: 8, height: 8))
             d.wantsLayer = true
             d.layer?.backgroundColor = dot.cgColor
             d.layer?.cornerRadius = 4
@@ -108,6 +123,19 @@ final class WindowTileView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func closeTapped() { controller?.closeRequested(info) }
+    @objc private func checkTapped() { controller?.tileCheckToggled(info) }
+
+    // Nur die Anzeige — die Wahrheit liegt beim Controller (`checked`-Liste),
+    // der bei jedem Rebuild den aktuellen Stand über `checked:` reinreicht.
+    private func applyCheckState() {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        let name = isChecked ? "checkmark.circle.fill" : "circle"
+        checkButton?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Für Auto-Arrange auswählen")?
+            .withSymbolConfiguration(cfg)
+        checkButton?.contentTintColor = isChecked
+            ? NSColor.systemGreen
+            : NSColor.white.withAlphaComponent(0.35)
+    }
 
     private var kbSelected = false
     private var dimmed = false
@@ -116,6 +144,14 @@ final class WindowTileView: NSView {
     func setKeyboardSelection(_ on: Bool) {
         kbSelected = on
         applyHighlight()
+    }
+
+    // Auto-Arrange-Häkchen von außen (Leertaste) nachziehen, ohne die ganze
+    // Kachel neu aufzubauen.
+    func setChecked(_ on: Bool) {
+        guard isChecked != on else { return }
+        isChecked = on
+        applyCheckState()
     }
 
     // Abdunkeln, wenn die Kachel nicht zum aktiven Suchfilter passt.

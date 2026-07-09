@@ -45,6 +45,15 @@ enum ExtraZone: Equatable, CaseIterable {
     }
 }
 
+// Wie die Restfläche bei rand-verankerten Aktionen mit anderen Fenstern
+// gefüllt wird — live per Taste (F) im Loop-Modus umschaltbar, siehe
+// LoopMenuView. Startzustand ist immer .solo, siehe LoopMenuView.configure.
+enum LoopFillMode: Int, CaseIterable {
+    case solo, topThree, all
+
+    var next: LoopFillMode { LoopFillMode(rawValue: (rawValue + 1) % Self.allCases.count)! }
+}
+
 enum LoopAction: Equatable {
     case edge(BentoZone, EdgeVariant)      // zone ∈ {.left,.right,.top,.bottom}
     case corner(BentoZone, EdgeVariant)    // zone ∈ {.topLeft,...}; Variante = Kantenlänge (½/⅓/⅔)

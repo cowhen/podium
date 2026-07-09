@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyHotkey()
         DirectActions.register()
         DragSnapManager.shared.start()
+        LinkedEdges.shared.start()
         RestoreCenter.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: SettingsStore.changed, object: nil)
@@ -82,6 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Layout für dieses Setup speichern", action: #selector(saveLayout), keyEquivalent: "s"))
         menu.addItem(NSMenuItem(title: "Gespeichertes Layout anwenden", action: #selector(applyLayout), keyEquivalent: "l"))
+        // ⇧⌘L statt ⌘L: reine Menü-Shortcuts eines Status-Item-Menüs sind nie
+        // global (sie greifen nur, solange dieses Menü gerade offen/aktiv
+        // getrackt wird) — Kollision mit macOS-Systemshortcuts ist also
+        // ausgeschlossen; ⇧ dient hier nur zur Unterscheidung von der Zeile
+        // direkt darüber innerhalb desselben Menüs.
+        let applyAndLaunchItem = NSMenuItem(title: "Gespeichertes Layout anwenden und Apps starten",
+                                            action: #selector(applyLayoutAndLaunchApps), keyEquivalent: "l")
+        applyAndLaunchItem.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(applyAndLaunchItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Einstellungen…", action: #selector(openSettings), keyEquivalent: ","))
         loginItem = NSMenuItem(title: "Bei Anmeldung starten", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -115,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func applyLayout() {
         guard let p = LayoutPresetStore.shared.preset(for: displaySetFingerprint()) else { return }
         LayoutPresetStore.shared.apply(p)
+    }
+    @objc private func applyLayoutAndLaunchApps() {
+        guard let p = LayoutPresetStore.shared.preset(for: displaySetFingerprint()) else { return }
+        LayoutPresetStore.shared.applyLaunchingMissingApps(p)
     }
     @objc private func openSettings() {
         if settingsWC == nil { settingsWC = SettingsWindowController() }

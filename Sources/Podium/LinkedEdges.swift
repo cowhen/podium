@@ -38,6 +38,24 @@ final class LinkedEdges {
     // canceln (Nachbarn folgen nie, Baseline bleibt stale).
     private var pendings: [UInt64: DispatchWorkItem] = [:]
     private var nextID: UInt64 = 1
+    // Nachbarn folgen NUR, wenn beim Resizen ⌃ (Control) gehalten wird —
+    // sonst würde JEDES Resize eines gekachelten Fensters ungefragt Nachbarn
+    // mitziehen. ⇧ und ⌥ scheiden aus: macOS belegt beide beim Ziehen einer
+    // Fensterkante bereits nativ (⇧ = Seitenverhältnis beibehalten, ⌥ =
+    // symmetrisch von der Mitte aus, zusammen beides kombiniert) — ⌃ hat
+    // dort keine native Bedeutung. AX-Events tragen keinen Tastatur-Zustand;
+    // dafür global den Control-Status mitlesen (öffentliche API, rein
+    // lesend, wie bei DragSnap).
+    private var isControlHeld = false
+    private var flagsMonitor: Any?
+
+    // Einmal beim App-Start aufrufen (main.swift, neben DragSnapManager.start()).
+    func start() {
+        guard flagsMonitor == nil else { return }
+        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.isControlHeld = event.modifierFlags.contains(.control)
+        }
+    }
 
     // Nach jedem Kacheln aufgerufen: Fenster fürs Beobachten anmelden (idempotent —
     // bereits beobachtete Fenster werden nicht doppelt abonniert, nur ihr
@@ -144,6 +162,10 @@ final class LinkedEdges {
         let old = watched[idx].lastFrame
         watched[idx].lastFrame = new   // Baseline sofort weiterschieben, unabhängig vom Ergebnis unten
         guard old != new else { return }
+        // Nachbarn folgen nur, wenn ⌃ beim Resizen gehalten wurde — die
+        // Baseline oben ist trotzdem aktuell, ein Resize OHNE ⌃ verzieht also
+        // nie einen späteren ⌃-Resize durch eine veraltete Kante.
+        guard isControlHeld else { return }
 
         let ds = currentDisplays()
         guard let dID = displayID(containing: CGPoint(x: new.midX, y: new.midY), in: ds) else { return }

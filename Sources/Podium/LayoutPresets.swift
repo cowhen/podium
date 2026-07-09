@@ -114,6 +114,37 @@ final class LayoutPresetStore {
         return placed
     }
 
+    // Wie apply(), aber startet vorher jede im Preset gespeicherte App, die
+    // noch nicht läuft — und wartet, bis jede gestartete App mindestens ein
+    // Fenster hat, bevor tatsächlich positioniert wird (App-Start ist async,
+    // je nach App unterschiedlich langsam). Nach 10s Timeout wird trotzdem
+    // angewendet — apply() lässt unerreichbare Einträge ohnehin unangetastet.
+    func applyLaunchingMissingApps(_ preset: LayoutPreset) {
+        let needed = Set(preset.entries.map { $0.bundleID })
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        let missing = needed.subtracting(running)
+        guard !missing.isEmpty else { apply(preset); return }
+
+        for bid in missing {
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bid) else { continue }
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+        waitForWindows(of: missing, preset: preset, attempt: 0)
+    }
+
+    private func waitForWindows(of bundleIDs: Set<String>, preset: LayoutPreset, attempt: Int) {
+        let wins = appWM.collectWindows(cfg: AppConfig.load())
+        let present = Set(wins.compactMap { bundleID(of: $0) })
+        let stillMissing = bundleIDs.subtracting(present)
+        guard !stillMissing.isEmpty, attempt < 20 else {   // 20 × 0.5s = 10s Timeout
+            apply(preset)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.waitForWindows(of: stillMissing, preset: preset, attempt: attempt + 1)
+        }
+    }
+
     // Beim Setup-Wechsel (Opt-in) das passende Preset automatisch anwenden.
     // Debounce, weil macOS beim Umstecken mehrere Events feuert und die
     // Displays erst nacheinander registriert.

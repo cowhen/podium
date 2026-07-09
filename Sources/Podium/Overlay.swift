@@ -8,10 +8,23 @@ final class OverlayWindow: NSWindow {
     override func keyDown(with event: NSEvent) {
         if !OverlayController.shared.handleKey(event) { super.keyDown(with: event) }
     }
+    // Nötig, damit der Loop-Modus erkennt, wenn zwei Pfeiltasten gleichzeitig
+    // gehalten werden (z. B. ← + ↑ fährt die Ecke oben-links an).
+    override func keyUp(with event: NSEvent) {
+        OverlayController.shared.handleKeyUp(event)
+        super.keyUp(with: event)
+    }
 }
 
 final class OverlayBackgroundView: FlippedVisualEffectView {
     override func mouseDown(with event: NSEvent) { OverlayController.shared.close() }
+}
+
+// Content-View der Klick-Fang-Fenster aus setupStageClickCatchers() — reine
+// Weiterleitung, kein eigener Zustand (siehe dortiger Kommentar fürs Warum).
+private final class StageClickCatcherView: NSView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
 // "Bühne": alle verwalteten Fenster an einer Stelle, gruppiert nach App.
@@ -50,6 +63,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var hoverTimer: Timer?
     private var preview: PreviewPopup?
 
+    // Dritter Auswahlweg (neben Pfeiltasten/Suche): Fenster unter dem
+    // Mauszeiger auf den echten Monitoren, siehe stageMouseMoved().
+    private var stageMouseTimer: Timer?
+    private var lastPolledStageMouseLocation: NSPoint?
+    // Ein Klick-Fang-Fenster pro Monitor, siehe setupStageClickCatchers().
+    private var stageClickCatchers: [NSWindow] = []
+
     // Tastatur-Zustand: genau eine Auswahl auf der Bühne.
     private enum Dir { case left, right, up, down }
     private var selectedID: CGWindowID?
@@ -71,7 +91,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // wurden — steuert autoMinimize beim Schließen.
     private var loopMenuView: LoopMenuView?
     private var loopRingPanel: LoopRingPanel?
-    private var previewPanel: LoopPreviewPanel?
+    // Ein Panel pro Rechteck der aktuellen Vorschau (gezogenes Fenster PLUS
+    // ggf. Nachbarn bei fillMode != .solo) — wächst/schrumpft mit der Anzahl.
+    private var previewPanels: [LoopPreviewPanel] = []
     // Plain .mouseMoved-Events werden vom System nur erzeugt, wenn ein
     // Fenster darunter das explizit anfordert — ein globaler NSEvent-Monitor
     // dafür feuert deshalb oft gar nicht, sobald der Zeiger über einem
@@ -86,6 +108,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var loopTarget: WinInfo?
     private var loopAnchorDisplay: Display?   // Monitor, auf dem der Ring aktuell "sitzt"
     private var touchedIDs: Set<CGWindowID> = []
+    // Häkchen fürs Auto-Arrange (Leertaste/Klick) — geordnet nach Ankreuz-
+    // Reihenfolge, damit autoArrange() beim Verteilen eine stabile,
+    // nachvollziehbare Reihenfolge über die Monitore hinweg hat.
+    private var checked: [CGWindowID] = []
     private var stashed: [CGWindowID: (frame: CGRect, edge: BentoZone)] = [:]
     private let monitorBadges = MonitorBadgeSet()
 
@@ -115,6 +141,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         search = ""
         touchedIDs = []
         hiddenPids = []
+        checked = []
 
         // Verbundene Ränder auch für Fenster anmelden, die von Hand (nicht
         // über Podium) nebeneinandergeschoben wurden — sobald die Bühne
@@ -163,6 +190,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func teardown() {
         hoverTimer?.invalidate()
+        stageMouseTimer?.invalidate()
+        stageMouseTimer = nil
+        lastPolledStageMouseLocation = nil
+        stageClickCatchers.forEach { $0.orderOut(nil) }
+        stageClickCatchers = []
         hidePreview()
         selectionHighlight?.hide()
         selectionHighlight = nil
@@ -179,6 +211,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         selectedID = nil
         touchedIDs = []
         hiddenPids = []
+        checked = []
         lastCommitted = nil
         // `stashed` bewusst NICHT leeren: gestashte Fenster hängen sonst nach
         // Overlay-Schließen für immer offscreen (⇧S fände nichts mehr) —
@@ -193,7 +226,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if cheatsheet != nil { hideCheatsheet(); return true }
         if let menu = loopMenuView { return menu.handleKey(event) }
         let cmd = event.modifierFlags.contains(.command)
+        return dispatchKeyDown(event, cmd: cmd)
+    }
 
+    // Nur im Loop-Modus relevant (zwei Pfeiltasten gleichzeitig = Ecke).
+    func handleKeyUp(_ event: NSEvent) {
+        loopMenuView?.handleKeyUp(event)
+    }
+
+    private func dispatchKeyDown(_ event: NSEvent, cmd: Bool) -> Bool {
         switch event.keyCode {
         case 36, 76: enterPressed(cmd: cmd); return true
         case 53: escPressed(); return true
@@ -247,10 +288,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
         return allWins.first { $0.windowID == id }
     }
 
+    // Sind ≥2 Fenster angekreuzt, gewinnt Auto-Arrange über das normale
+    // Enter-Verhalten — ein einzelnes Häkchen (oder gar keins) ändert nichts
+    // am bestehenden Interaktionsmodell.
+    //
     // Interaktionsmodell per Einstellung (stageEnterSwitches):
     // Aus (Default): Enter/Klick = Loop-Modus, ⌘↵/Doppelklick = nur wechseln.
     // An: Enter/Klick = nur wechseln (klassischer Switcher), Leertaste/⌘↵ = Loop-Modus.
     private func enterPressed(cmd: Bool) {
+        if checked.count >= 2 {
+            autoArrange(checked.compactMap { id in allWins.first { $0.windowID == id } })
+            return
+        }
         guard let w = selectedInfo() else { return }
         let switchFirst = SettingsStore.shared.stageEnterSwitches
         let wantsSwitch = switchFirst ? !cmd : cmd
@@ -261,14 +310,51 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    // Leertaste: im Switcher-Modus der Weg in den Loop-Modus; sonst ein
-    // normales Suchzeichen (Fenstertitel enthalten Leerzeichen).
+    // Leertaste toggelt das Auto-Arrange-Häkchen des tastatur-markierten
+    // Fensters — ersetzt das bisherige Doppel-Verhalten (Loop-Modus-Zugang
+    // im Switcher-Modus / Leerzeichen im Filter) vollständig.
     private func spacePressed() {
-        if SettingsStore.shared.stageEnterSwitches {
-            openLoopMode(for: selectedInfo())
+        guard let w = selectedInfo() else { return }
+        tileCheckToggled(w)
+    }
+
+    // Auch per Mausklick auf die Checkbox einer Kachel erreichbar.
+    func tileCheckToggled(_ info: WinInfo) {
+        if let idx = checked.firstIndex(of: info.windowID) {
+            checked.remove(at: idx)
         } else {
-            setSearch(search + " ")
+            checked.append(info.windowID)
         }
+        updateSelectionUI()
+    }
+
+    // Verteilt die angekreuzten Fenster proportional zur Monitorfläche auf
+    // alle aktuellen Displays (größere Monitore bekommen mehr Fenster), pro
+    // Monitor dann als möglichst quadratisches Auto-Raster (LoopEngine.autoGrid).
+    // Reicht der Platz auf einem Monitor nicht für alle ihm zugeteilten
+    // Fenster in Mindestgröße, lässt autoGrid die überzähligen bewusst unangetastet.
+    private func autoArrange(_ infos: [WinInfo]) {
+        guard !infos.isEmpty else { return }
+        LinkedEdges.shared.suppress()
+        let sortedDisplays = displays.sorted { $0.visible.width * $0.visible.height > $1.visible.width * $1.visible.height }
+        let weights = sortedDisplays.map { $0.visible.width * $0.visible.height }
+        let counts = LoopEngine.allocateByWeight(total: infos.count, weights: weights)
+        var idx = 0
+        for (display, count) in zip(sortedDisplays, counts) {
+            guard count > 0 else { continue }
+            let group = Array(infos[idx..<min(idx + count, infos.count)])
+            idx += count
+            let frames = LoopEngine.autoGrid(count: group.count, in: display.visible)
+            for (info, frame) in zip(group, frames) {
+                if let cur = axFrame(info.ax) { WindowHistory.shared.recordIfNeeded(info.windowID, currentFrame: cur) }
+                axSetFrame(info.ax, frame)
+                axRaise(info.ax)
+                touchedIDs.insert(info.windowID)
+            }
+        }
+        checked = []
+        zRank = appWM.zOrderRank()
+        close()
     }
 
     private func escPressed() {
@@ -308,6 +394,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func updateSelectionUI() {
         for t in stageView?.tiles ?? [] {
             t.setKeyboardSelection(t.info.windowID == selectedID)
+            t.setChecked(checked.contains(t.info.windowID))
         }
         updateRealHighlight()
     }
@@ -347,8 +434,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func updateFooter() {
         footerLabel?.stringValue = loopMenuView != nil
-            ? "←→↑↓ Rand   U I J K Ecken   E/⇧E Extras   M A H W C Allgemein   Z/⇧Z Minimieren   X Ausblenden   S/⇧S Stash   ⌘Z Rückgängig   1–9 Monitor   ⇥/⇧⇥ Wechseln   ↵ anwenden   Esc zurück"
-            : "tippen filtert   ←→↑↓ wählen   ↵ / Klick positionieren   ? Hilfe"
+            ? "←→↑↓ Rand   U I J K Ecken   E/⇧E Extras   F/Rechtsklick Füllen   M A H W C Allgemein   Z/⇧Z Minimieren   X Ausblenden   S/⇧S Stash   ⌘Z Rückgängig   1–9 Monitor   ⇥/⇧⇥ Wechseln   ↵ anwenden   Esc zurück"
+            : "tippen filtert   ←→↑↓ wählen   ↵ / Klick positionieren   Leertaste Auto-Arrange-Häkchen   ⌃+Ziehen verbindet Ränder   ? Hilfe"
         footerLabel?.textColor = loopMenuView != nil ? .systemOrange : .tertiaryLabelColor
     }
 
@@ -408,10 +495,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Bühne erst am 75%-Maximum layouten und messen, dann die Breite auf
         // den tatsächlichen Bedarf trimmen und ggf. enger neu umbrechen.
         let stageV = StageView(controller: self)
-        stageV.setWindows(stageList(), filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin)
+        stageV.setWindows(stageList(), filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin, checked: { self.checked.contains($0.windowID) })
         innerWidth = min(availW, max(stageV.frame.width, 420))
         if innerWidth < availW {
-            stageV.setWindows(stageList(), filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin)
+            stageV.setWindows(stageList(), filter: search, maxWidth: innerWidth, dot: dotColor, floating: isFloatingWin, checked: { self.checked.contains($0.windowID) })
         }
         stageMaxWidth = innerWidth
         stageView = stageV
@@ -498,6 +585,75 @@ final class OverlayController: NSObject, NSWindowDelegate {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             win.animator().alphaValue = 1
         }
+
+        // Dritter Auswahlweg neben Pfeiltasten/Suche: das Fenster unter dem
+        // Mauszeiger auf den echten Monitoren wählen — .common-Mode wie beim
+        // Loop-Modus-Tracking, damit es auch in Tracking-Loops (Menüs) läuft.
+        let mTimer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.stageMouseMoved()
+        }
+        RunLoop.main.add(mTimer, forMode: .common)
+        stageMouseTimer = mTimer
+
+        setupStageClickCatchers()
+    }
+
+    // Ein Klick-Fang-Fenster pro Monitor (wie LoopRingPanel für den
+    // Loop-Modus, siehe dort): ein Klick auf das per Maus-Hover ausgewählte
+    // echte Fenster bestätigt genau wie ↵ — ohne eigenes Fenster würde der
+    // Klick zuerst die fremde App treffen (Button drücken, Link öffnen, …),
+    // bevor Podium überhaupt reagieren könnte. Direkt UNTER das Bühnen-
+    // Fenster einsortiert, damit Klicks auf die Bühne selbst (Kacheln,
+    // Hintergrund) unverändert bei ihr ankommen.
+    private func setupStageClickCatchers() {
+        guard let mainWin = window else { return }
+        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        for d in displays {
+            let full = d.full
+            let frame = NSRect(x: full.minX, y: primaryH - full.maxY, width: full.width, height: full.height)
+            let win = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            win.isOpaque = false
+            win.backgroundColor = .clear
+            win.level = .floating
+            win.hasShadow = false
+            win.ignoresMouseEvents = false
+            win.isReleasedWhenClosed = false
+            let view = StageClickCatcherView(frame: NSRect(origin: .zero, size: frame.size))
+            view.onClick = { [weak self] in self?.stageClickConfirm() }
+            win.contentView = view
+            win.orderFrontRegardless()
+            win.order(.below, relativeTo: mainWin.windowNumber)
+            stageClickCatchers.append(win)
+        }
+    }
+
+    // Solange der Loop-Modus offen ist, entscheidet dessen eigener Catcher
+    // (LoopRingPanel) — dieselbe Aktion wie ↵ ohne ⌘ (positionieren bzw.
+    // wechseln, je nach Einstellung; bei ≥2 Häkchen Auto-Arrange).
+    private func stageClickConfirm() {
+        guard loopMenuView == nil else { return }
+        enterPressed(cmd: false)
+    }
+
+    // Nur reagieren, wenn die Maus sich seit dem letzten Tick bewegt hat
+    // (sonst überschreibt der 60Hz-Poll ständig jede Pfeiltasten-Auswahl im
+    // nächsten Tick wieder) und solange der Loop-Modus nicht offen ist (der
+    // hat sein eigenes Tracking, siehe loopMouseMoved). Kein Treffer (leerer
+    // Schreibtisch oder Zeiger über der Bühne selbst) lässt die bestehende
+    // Auswahl unverändert stehen.
+    private func stageMouseMoved() {
+        guard loopMenuView == nil else { return }
+        let mouse = NSEvent.mouseLocation
+        if let last = lastPolledStageMouseLocation, hypot(mouse.x - last.x, mouse.y - last.y) < 1 { return }
+        lastPolledStageMouseLocation = mouse
+        if let w = window, w.frame.contains(mouse) { return }
+        let primaryH = NSScreen.screens.first?.frame.height ?? 0
+        let q = CGPoint(x: mouse.x, y: primaryH - mouse.y)
+        let candidates = allWins.filter { !$0.minimized && $0.bounds.contains(q) }
+        guard let hit = candidates.min(by: { (zRank[$0.windowID] ?? .max) < (zRank[$1.windowID] ?? .max) }),
+              hit.windowID != selectedID else { return }
+        selectedID = hit.windowID
+        updateSelectionUI()
     }
 
     // Unfreiwilliger Fokusverlust (Spotlight, System-Dialog, Fremd-Klick):
@@ -677,6 +833,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         WindowHistory.shared.forget(info.windowID)
         touchedIDs.remove(info.windowID)
         stashed.removeValue(forKey: info.windowID)
+        checked.removeAll { $0 == info.windowID }
         if selectedID == info.windowID { selectedID = nil }
         refreshStage()
     }
@@ -699,19 +856,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
         loopAnchorDisplay = d
         window?.contentView?.isHidden = true
 
+        let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
         let menu = LoopMenuView()
-        menu.configure(.init(target: info, display: d, displays: displays))
-        menu.onPreview = { [weak self] rect in
-            guard let self else { return }
-            guard let rect else { self.previewPanel?.hide(); return }
-            if self.previewPanel == nil { self.previewPanel = LoopPreviewPanel() }
-            self.previewPanel?.show(quartzRect: rect)
-        }
-        menu.onCommit = { [weak self] action in self?.applyLoopAction(action, to: info) }
+        menu.configure(.init(target: info, display: d, others: others, displays: displays))
+        menu.onPreview = { [weak self] rects in self?.showPreviews(rects) }
+        menu.onCommit = { [weak self] action, fillMode in self?.applyLoopAction(action, fillMode: fillMode, to: info) }
         menu.onCancel = { [weak self] in self?.closeLoopMode() }
         menu.onAnchorChange = { [weak self] d in
-            self?.loopAnchorDisplay = d
-            self?.repositionRingPanel(on: d)
+            guard let self else { return }
+            self.loopAnchorDisplay = d
+            let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: self.cfg)
+            self.loopMenuView?.updateDisplay(d, others: others)
+            self.repositionRingPanel(on: d)
         }
         loopMenuView = menu
 
@@ -719,6 +875,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Klick irgendwo auf dem Anker-Monitor = Commit (Fang übers eigene
         // Catcher-Fenster; ein Global-Monitor würde eigene App-Events nie sehen).
         panel.onClick = { [weak self] in self?.loopMouseCommit() }
+        panel.onRightClick = { [weak self] in self?.loopMenuView?.cycleFillMode() }
         loopRingPanel = panel
         repositionRingPanel(on: d)
 
@@ -746,8 +903,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         lastPolledMouseLocation = nil
         loopRingPanel?.hide()
         loopRingPanel = nil
-        previewPanel?.hide()
-        previewPanel = nil
+        previewPanels.forEach { $0.hide() }
+        previewPanels = []
         loopTarget = nil
         loopAnchorDisplay = nil
     }
@@ -756,12 +913,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Position — genau wie ↵, nur mit der Maus statt der Tastatur.
     private func loopMouseCommit() {
         guard let info = loopTarget, let action = loopMenuView?.current else { return }
-        applyLoopAction(action, to: info)
+        applyLoopAction(action, fillMode: loopMenuView?.fillMode ?? .solo, to: info)
     }
 
     private func repositionRingPanel(on d: Display) {
         guard let menu = loopMenuView else { return }
         loopRingPanel?.show(menu, on: d)
+    }
+
+    // Ein Panel pro Rechteck: bestehende Panels wiederverwenden, überzählige
+    // ausblenden — so flackert es nicht, wenn die Anzahl gleich bleibt (der
+    // Normalfall bei jeder Mausbewegung/Zonenwechsel).
+    private func showPreviews(_ rects: [CGRect]) {
+        while previewPanels.count < rects.count { previewPanels.append(LoopPreviewPanel()) }
+        while previewPanels.count > rects.count {
+            previewPanels.removeLast().hide()
+        }
+        for (panel, rect) in zip(previewPanels, rects) { panel.show(quartzRect: rect) }
     }
 
     // Globale Mausposition -> Zone/Variante, ohne Kreis-Zwang: es reicht,
@@ -779,7 +947,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if let hitID = displayID(containing: q, in: displays), hitID != d0.id,
            let d = displays.first(where: { $0.id == hitID }) {
             loopAnchorDisplay = d
-            loopMenuView?.updateDisplay(d)
+            if let info = loopTarget {
+                let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+                loopMenuView?.updateDisplay(d, others: others)
+            }
             repositionRingPanel(on: d)
         }
         guard let anchor = loopAnchorDisplay else { return }
@@ -807,7 +978,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Die eine Anwendungsroutine für den Loop-Modus: setzt EIN Fenster real
     // um (solo — außer der Nutzer hat "mit Nachbarn kacheln" für Hälften/
     // Viertel eingeschaltet, dann via BentoApply wie Drag-to-Edge/Radial).
-    private func applyLoopAction(_ action: LoopAction, to info: WinInfo) {
+    private func applyLoopAction(_ action: LoopAction, fillMode: LoopFillMode, to info: WinInfo) {
         // Nach dem Anwenden zurück aufs volle Board: closeLoopMode() blendet
         // die Bühne wieder ein, setSearch("") löscht den Filter UND ruft
         // dabei refreshStage() bereits mit auf — kein separater Aufruf nötig.
@@ -834,14 +1005,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
         func fillEdge(_ zone: BentoZone, frame: CGRect) {
             axSetFrame(info.ax, frame)
             axRaise(info.ax)
-            guard SettingsStore.shared.loopFillNeighbors else { return }
+            guard fillMode != .solo else { return }
             let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+                .sorted { $0.bounds.width * $0.bounds.height > $1.bounds.width * $1.bounds.height }
             guard !others.isEmpty else { return }
-            let toPlace = Array(others.prefix(3))
             let rest = LoopEngine.remainder(of: frame, in: d.visible, edge: zone)
-            let vertical = rest.height > rest.width
-            let frames = Layout.frames(visible: rest, vertical: vertical, count: toPlace.count, split: 0)
-            for (w, f) in zip(toPlace, frames) { axSetFrame(w.ax, f) }
+            switch fillMode {
+            case .solo:
+                break
+            case .topThree:
+                let toPlace = Array(others.prefix(3))
+                let vertical = rest.height > rest.width
+                let frames = Layout.frames(visible: rest, vertical: vertical, count: toPlace.count, split: 0)
+                for (w, f) in zip(toPlace, frames) { axSetFrame(w.ax, f) }
+            case .all:
+                let frames = LoopEngine.autoGrid(count: others.count, in: rest)
+                for (w, f) in zip(others, frames) { axSetFrame(w.ax, f) }
+            }
         }
 
         switch action {
@@ -850,8 +1030,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         case .corner(let zone, let variant):
             // Bento-Nachbar-Kacheln nur bei der 50/50-Ecke (BentoLayout kennt
             // keine ⅓/⅔-Ecken) — gecyclte Varianten immer solo.
-            if SettingsStore.shared.loopFillNeighbors, variant == .half {
+            if fillMode != .solo, variant == .half {
                 let others = appWM.otherWindows(on: d, excludingAX: info.ax, pid: info.pid, cfg: cfg)
+                    .sorted { $0.bounds.width * $0.bounds.height > $1.bounds.width * $1.bounds.height }
                 BentoApply.apply(zone: zone, dragged: info.ax, others: others.map { $0.ax }, display: d)
             } else {
                 axSetFrame(info.ax, LoopEngine.frame(zone: zone, variant: variant, in: d.visible))
@@ -936,7 +1117,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func refreshStage() {
         guard let stageV = stageView else { return }
-        stageV.setWindows(stageList(), filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin)
+        stageV.setWindows(stageList(), filter: search, maxWidth: stageMaxWidth, dot: dotColor, floating: isFloatingWin, checked: { self.checked.contains($0.windowID) })
         stageV.frame.origin.x = 28 + ((innerWidth - stageV.frame.width) / 2).rounded()
         resizeToFitStage()
         updateSelectionUI()

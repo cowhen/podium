@@ -56,6 +56,58 @@ enum LoopEngine {
         }
     }
 
+    // Verteilt bis zu `count` Fenster in einem möglichst quadratischen
+    // Auto-Raster innerhalb `area` (wie Layout.frames selbst um `gap`
+    // insetted — ein Aufrufer, der bereits eine Restfläche via `remainder`
+    // hat, bekommt so denselben einfachen Abstand zum gezogenen Fenster wie
+    // die feste 1/2/3/2x2-Aufteilung). Reicht der Platz nicht für `count`
+    // Zellen in Mindestgröße, werden schrittweise weniger versucht — die
+    // Rückgabe kann also kürzer als `count` sein; der Aufrufer lässt die
+    // überzähligen Fenster dann bewusst unangetastet statt sie zu verquetschen.
+    static func autoGrid(count: Int, in area: CGRect, minEdge: CGFloat = Tuning.minWindowEdge,
+                         gap: CGFloat = Layout.gap) -> [CGRect] {
+        guard count > 0 else { return [] }
+        let inner = area.insetBy(dx: gap, dy: gap)
+        for n in stride(from: count, through: 1, by: -1) {
+            let cols = Int(ceil(sqrt(Double(n))))
+            let rows = Int(ceil(Double(n) / Double(cols)))
+            let cellW = (inner.width - CGFloat(cols - 1) * gap) / CGFloat(cols)
+            let cellH = (inner.height - CGFloat(rows - 1) * gap) / CGFloat(rows)
+            guard cellW >= minEdge, cellH >= minEdge else { continue }
+            return (0..<n).map { i in
+                let col = i % cols, row = i / cols
+                return CGRect(x: inner.minX + CGFloat(col) * (cellW + gap),
+                             y: inner.minY + CGFloat(row) * (cellH + gap),
+                             width: cellW, height: cellH)
+            }
+        }
+        return []   // selbst 1 Fenster passt nicht in Mindestgröße
+    }
+
+    // Verteilt `total` Elemente proportional zu `weights` (z. B. Monitorflächen
+    // fürs Auto-Arrange) auf ebenso viele Gruppen, per größten Resten (Hare-
+    // Niemeyer) — reines Runden (Int(x)) würde die Summe nicht exakt auf
+    // `total` bringen. Sind alle Gewichte 0, wird gleichmäßig verteilt statt
+    // durch 0 zu teilen.
+    static func allocateByWeight(total: Int, weights: [CGFloat]) -> [Int] {
+        guard total > 0, !weights.isEmpty else { return Array(repeating: 0, count: weights.count) }
+        let sum = weights.reduce(0, +)
+        guard sum > 0 else {
+            var counts = Array(repeating: total / weights.count, count: weights.count)
+            for i in 0..<(total % weights.count) { counts[i] += 1 }
+            return counts
+        }
+        let raw = weights.map { CGFloat(total) * $0 / sum }
+        var counts = raw.map { Int($0) }
+        var remainder = total - counts.reduce(0, +)
+        let byFraction = raw.indices.sorted { (raw[$0] - CGFloat(counts[$0])) > (raw[$1] - CGFloat(counts[$1])) }
+        for i in byFraction where remainder > 0 {
+            counts[i] += 1
+            remainder -= 1
+        }
+        return counts
+    }
+
     // Wiederholtes Drücken derselben Randrichtung cycled durch die Varianten.
     static func nextVariant(_ v: EdgeVariant) -> EdgeVariant {
         let all = EdgeVariant.allCases

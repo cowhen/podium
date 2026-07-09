@@ -73,12 +73,6 @@ final class SettingsStore {
         get { flag("dragSnap", default: true) }
         set { setFlag("dragSnap", newValue) }
     }
-    // Loop-Modus: bei Hälften/Vierteln Nachbarfenster automatisch mit ins
-    // Bento-Raster ziehen (statt nur das eine ausgewählte Fenster zu bewegen).
-    var loopFillNeighbors: Bool {
-        get { flag("loopFillNeighbors", default: false) }
-        set { setFlag("loopFillNeighbors", newValue) }
-    }
     // Bühne: Fenster nach App gruppieren (mit Gruppenkopf) statt als eine
     // flache, nur nach Z-Order sortierte Liste.
     var stageGroupByApp: Bool {
@@ -87,7 +81,8 @@ final class SettingsStore {
     }
     // Interaktionsmodell der Bühne: false = Enter/Klick öffnen den Loop-Modus
     // (⌘↵/Doppelklick wechseln nur), true = Enter/Klick wechseln nur wie ein
-    // klassischer Switcher (Loop-Modus über Leertaste bzw. ⌘↵).
+    // klassischer Switcher (Loop-Modus über ⌘↵). Die Leertaste ist in beiden
+    // Modi fürs Auto-Arrange-Häkchen reserviert (siehe tileCheckToggled).
     var stageEnterSwitches: Bool {
         get { flag("stageEnterSwitches", default: false) }
         set { setFlag("stageEnterSwitches", newValue) }
@@ -425,14 +420,14 @@ final class SettingsWindowController: NSWindowController {
         st.addArrangedSubview(hintLabel("Direkt-Hotkeys ohne Overlay (Hälften, Drittel, Ecken, Monitor-Wurf, …) sind unter „Hotkeys“ frei belegbar."))
         st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Verhalten"))
-        st.addArrangedSubview(toggleRow("Enter/Klick wechselt nur (Loop-Modus über Leertaste)",
-            "An: Enter/Klick fokussieren das Fenster und schließen (klassischer Switcher), die Leertaste öffnet den Loop-Modus. Aus: Enter/Klick öffnen den Loop-Modus, ⌘↵ oder Doppelklick wechseln nur.",
+        st.addArrangedSubview(toggleRow("Enter/Klick wechselt nur (Loop-Modus über ⌘↵)",
+            "An: Enter/Klick fokussieren das Fenster und schließen (klassischer Switcher), ⌘↵ öffnet den Loop-Modus. Aus: Enter/Klick öffnen den Loop-Modus, ⌘↵ oder Doppelklick wechseln nur. In beiden Modi: Leertaste kreuzt ein Fenster fürs Auto-Arrange an — bei ≥2 Häkchen verteilt Enter sie proportional auf alle Monitore.",
             isOn: SettingsStore.shared.stageEnterSwitches, action: #selector(toggleEnterSwitches(_:))))
         st.addArrangedSubview(toggleRow("Hintergrund-Fenster beim Schließen minimieren",
             "Bühnen-Fenster wandern ins Dock, wenn das Overlay zugeht (floatende ausgenommen).",
             isOn: SettingsStore.shared.autoMinimize, action: #selector(toggleAutoMinimize(_:))))
         st.addArrangedSubview(toggleRow("Verbundene Ränder",
-            "Zieht man am echten Rand eines gekachelten Fensters, folgen die Nachbarn.",
+            "Hältst du beim Ziehen der echten Fensterkante zusätzlich ⌃ (Control), passen sich angrenzende Fenster automatisch an. Ohne ⌃ resizt jedes Fenster wie gewohnt für sich allein (⇧ und ⌥ sind beim Resizen bereits von macOS selbst belegt).",
             isOn: SettingsStore.shared.linkedEdges, action: #selector(toggleLinked(_:))))
         st.addArrangedSubview(toggleRow("Layouts automatisch anwenden",
             "Beim Erkennen eines gespeicherten Monitor-Setups das Layout wiederherstellen.",
@@ -440,9 +435,6 @@ final class SettingsWindowController: NSWindowController {
         st.addArrangedSubview(toggleRow("Drag-to-Edge-Snap",
             "Ein Fenster an den Bildschirmrand ziehen füllt die halbe Fläche — zwei so gezogene Fenster ergeben einen Split.",
             isOn: SettingsStore.shared.dragSnap, action: #selector(toggleDragSnap(_:))))
-        st.addArrangedSubview(toggleRow("Loop-Modus kachelt mit Nachbarn",
-            "Bei jeder Rand-Aktion (Hälften, Drittel, Viertel-Streifen, Ecken) rutschen bis zu 3 andere Fenster auf demselben Monitor automatisch in die Restfläche. Zentrierte Aktionen (Zentrieren, Fast-Maximieren, Mitte-Hälfte/-Drittel, volle Höhe/Breite) bewegen immer nur das eine Fenster — dafür gibt es keinen sauberen Rest.",
-            isOn: SettingsStore.shared.loopFillNeighbors, action: #selector(toggleLoopFillNeighbors(_:))))
         return st
     }
 
@@ -614,9 +606,12 @@ final class SettingsWindowController: NSWindowController {
             let apply = NSButton(title: "Anwenden", target: self, action: #selector(applyLayoutClicked(_:)))
             apply.identifier = NSUserInterfaceItemIdentifier(p.fingerprint)
             apply.isEnabled = isActive
+            let applyAndLaunch = NSButton(title: "+ Apps starten", target: self, action: #selector(applyAndLaunchClicked(_:)))
+            applyAndLaunch.identifier = NSUserInterfaceItemIdentifier(p.fingerprint)
+            applyAndLaunch.isEnabled = isActive
             let del = NSButton(title: "Löschen", target: self, action: #selector(deleteLayoutClicked(_:)))
             del.identifier = NSUserInterfaceItemIdentifier(p.fingerprint)
-            let row = NSStackView(views: [name, apply, del])
+            let row = NSStackView(views: [name, apply, applyAndLaunch, del])
             row.spacing = 10
             list.addArrangedSubview(row)
         }
@@ -631,6 +626,11 @@ final class SettingsWindowController: NSWindowController {
               let p = LayoutPresetStore.shared.preset(for: fp) else { return }
         LayoutPresetStore.shared.apply(p)
     }
+    @objc private func applyAndLaunchClicked(_ sender: NSButton) {
+        guard let fp = sender.identifier?.rawValue,
+              let p = LayoutPresetStore.shared.preset(for: fp) else { return }
+        LayoutPresetStore.shared.applyLaunchingMissingApps(p)
+    }
     @objc private func deleteLayoutClicked(_ sender: NSButton) {
         guard let fp = sender.identifier?.rawValue else { return }
         LayoutPresetStore.shared.delete(fingerprint: fp)
@@ -640,7 +640,6 @@ final class SettingsWindowController: NSWindowController {
     @objc private func toggleLinked(_ sender: NSButton) { SettingsStore.shared.linkedEdges = sender.state == .on }
     @objc private func toggleAutoApply(_ sender: NSButton) { SettingsStore.shared.autoApplyLayouts = sender.state == .on }
     @objc private func toggleDragSnap(_ sender: NSButton) { SettingsStore.shared.dragSnap = sender.state == .on }
-    @objc private func toggleLoopFillNeighbors(_ sender: NSButton) { SettingsStore.shared.loopFillNeighbors = sender.state == .on }
     @objc private func toggleGroupByApp(_ sender: NSButton) { SettingsStore.shared.stageGroupByApp = sender.state == .on }
     @objc private func toggleEnterSwitches(_ sender: NSButton) { SettingsStore.shared.stageEnterSwitches = sender.state == .on }
     @objc private func tileSizeChanged(_ sender: NSSlider) { SettingsStore.shared.stageTileWidth = CGFloat(sender.doubleValue) }
