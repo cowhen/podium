@@ -108,6 +108,32 @@ enum LoopEngine {
         return counts
     }
 
+    // Weist Buckets (z. B. App-Gruppen — Fenster, die NIE auf verschiedene
+    // Monitore aufgeteilt werden dürfen) je einem Monitor-Index zu, unter
+    // Berücksichtigung der bereits berechneten Ziel-Fensterzahlen pro Monitor
+    // (targetCounts, siehe allocateByWeight). Gierig: größte Buckets zuerst,
+    // jeweils an den Monitor mit dem größten Rest-Defizit (target - bereits
+    // zugewiesen; kann durch Überbuchung negativ werden). Ergebnis in
+    // ursprünglicher bucketSizes-Reihenfolge, zum 1:1-Zippen mit den Buckets.
+    // Gleichstand im Defizit: kleinerer Monitor-Index gewinnt (deterministisch).
+    static func assignBucketsToDisplays(bucketSizes: [Int], targetCounts: [Int]) -> [Int] {
+        guard !bucketSizes.isEmpty, !targetCounts.isEmpty else { return Array(repeating: 0, count: bucketSizes.count) }
+        var assigned = Array(repeating: 0, count: targetCounts.count)
+        var result = Array(repeating: 0, count: bucketSizes.count)
+        let order = bucketSizes.indices.sorted { bucketSizes[$0] > bucketSizes[$1] }
+        for i in order {
+            var best = 0
+            var bestDeficit = targetCounts[0] - assigned[0]
+            for d in 1..<targetCounts.count {
+                let deficit = targetCounts[d] - assigned[d]
+                if deficit > bestDeficit { bestDeficit = deficit; best = d }
+            }
+            result[i] = best
+            assigned[best] += bucketSizes[i]
+        }
+        return result
+    }
+
     // Wiederholtes Drücken derselben Randrichtung cycled durch die Varianten.
     static func nextVariant(_ v: EdgeVariant) -> EdgeVariant {
         let all = EdgeVariant.allCases

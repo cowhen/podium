@@ -38,14 +38,18 @@ final class LinkedEdges {
     // canceln (Nachbarn folgen nie, Baseline bleibt stale).
     private var pendings: [UInt64: DispatchWorkItem] = [:]
     private var nextID: UInt64 = 1
-    // Nachbarn folgen NUR, wenn beim Resizen ⌃ (Control) gehalten wird —
-    // sonst würde JEDES Resize eines gekachelten Fensters ungefragt Nachbarn
-    // mitziehen. ⇧ und ⌥ scheiden aus: macOS belegt beide beim Ziehen einer
-    // Fensterkante bereits nativ (⇧ = Seitenverhältnis beibehalten, ⌥ =
-    // symmetrisch von der Mitte aus, zusammen beides kombiniert) — ⌃ hat
-    // dort keine native Bedeutung. AX-Events tragen keinen Tastatur-Zustand;
-    // dafür global den Control-Status mitlesen (öffentliche API, rein
-    // lesend, wie bei DragSnap).
+    // ⌃ (Control) ist jetzt ein FORCE-OVERRIDE, kein alleiniges Gate mehr:
+    // der normale Weg, Nachbarn beim Resizen mitzuziehen, ist die
+    // Ziehgeschwindigkeit (siehe LinkedEdgeDrag.swift — langsam ziehen
+    // verbindet, schnell ziehen nicht, ganz ohne Taste). ⌃ gehalten erzwingt
+    // trotzdem "verbunden", unabhängig von der Geschwindigkeit — Sicherheits-
+    // netz für Trackpad-Nutzer/Motorik, die nicht zuverlässig langsam ziehen
+    // können. ⇧ und ⌥ scheiden weiterhin aus: macOS belegt beide beim Ziehen
+    // einer Fensterkante bereits nativ (⇧ = Seitenverhältnis beibehalten,
+    // ⌥ = symmetrisch von der Mitte aus). AX-Events tragen keinen Tastatur-
+    // Zustand; dafür global den Control-Status mitlesen (öffentliche API,
+    // rein lesend, wie bei DragSnap) — auch von LinkedEdgeDrag über
+    // `isForceLinked` gelesen.
     private var isControlHeld = false
     private var flagsMonitor: Any?
 
@@ -156,42 +160,78 @@ final class LinkedEdges {
     // MARK: AX-Seite — live Kandidaten einsammeln, an die reine Geometrie
     // delegieren, Ergebnis anwenden.
 
+    // Nur für NICHT Maus-getriebene Resizes relevant (Skript, Tastaturkürzel
+    // in der Zielapp, …) — jede Maus-Drag-Geste übernimmt LinkedEdgeDrag
+    // komplett selbst (Geschwindigkeits-Gate + Live-Vorschau + Commit beim
+    // Loslassen) und schaltet diese Notification-Kette für die Dauer der
+    // Geste per suppress() stumm, damit sich beide Wege nie überschneiden.
     private func follow(watchedID: UInt64) {
         guard let idx = watched.firstIndex(where: { $0.id == watchedID }),
               let new = axFrame(watched[idx].ax) else { return }
         let old = watched[idx].lastFrame
         watched[idx].lastFrame = new   // Baseline sofort weiterschieben, unabhängig vom Ergebnis unten
         guard old != new else { return }
-        // Nachbarn folgen nur, wenn ⌃ beim Resizen gehalten wurde — die
-        // Baseline oben ist trotzdem aktuell, ein Resize OHNE ⌃ verzieht also
-        // nie einen späteren ⌃-Resize durch eine veraltete Kante.
         guard isControlHeld else { return }
 
+        let candidates = neighborCandidates(excluding: watched[idx].ax, near: CGPoint(x: new.midX, y: new.midY))
+        guard !candidates.isEmpty else { return }
+
+        let updates = Self.computeNeighborUpdates(resizedOld: old, resizedNew: new,
+                                                   candidates: candidates.map { $0.frame })
+        applyNeighborUpdates(updates, to: candidates)
+    }
+
+    // MARK: Für LinkedEdgeDrag (Maus-getriebene Erkennung, siehe dort) —
+    // LinkedEdges bleibt die Quelle der Wahrheit für "welche Fenster kennen
+    // wir" (watched) und die reine Geometrie (computeNeighborUpdates);
+    // LinkedEdgeDrag übernimmt nur Maus-Erkennung + Geschwindigkeit + Vorschau.
+
+    // Nur Fenster, die Podium schon "gesehen" hat, nimmt das Geschwindigkeits-
+    // Gate überhaupt in Betracht — unverändertes Scope ggü. heute.
+    func isWatching(_ ax: AXUIElement) -> Bool {
+        watched.contains { CFEqual($0.ax, ax) }
+    }
+
+    // ⌃ gehalten erzwingt "verbunden" unabhängig von der Ziehgeschwindigkeit.
+    var isForceLinked: Bool { isControlHeld }
+
+    // Alle beobachteten Fenster außer `ax` auf demselben Monitor wie `point` —
+    // verhindert, dass zwei Fenster auf benachbarten Monitoren durch einen
+    // zufällig übereinstimmenden Rand (Monitor-Grenze) fälschlich verbunden werden.
+    func neighborCandidates(excluding ax: AXUIElement, near point: CGPoint) -> [(ax: AXUIElement, frame: CGRect)] {
         let ds = currentDisplays()
-        guard let dID = displayID(containing: CGPoint(x: new.midX, y: new.midY), in: ds) else { return }
-
-        // Nur Fenster auf DEMSELBEN Monitor sind Kandidaten — verhindert, dass
-        // zwei Fenster auf benachbarten Monitoren durch einen zufällig
-        // übereinstimmenden Rand (Monitor-Grenze) fälschlich verbunden werden.
-        var candidateIndices: [Int] = []
-        var candidateFrames: [CGRect] = []
-        for (i, w) in watched.enumerated() where i != idx {
-            guard let f = axFrame(w.ax),
-                  displayID(containing: CGPoint(x: f.midX, y: f.midY), in: ds) == dID else { continue }
-            candidateIndices.append(i)
-            candidateFrames.append(f)
+        guard let dID = displayID(containing: point, in: ds) else { return [] }
+        return watched.compactMap { w in
+            guard !CFEqual(w.ax, ax), let f = axFrame(w.ax),
+                  displayID(containing: CGPoint(x: f.midX, y: f.midY), in: ds) == dID else { return nil }
+            return (w.ax, f)
         }
-        guard !candidateFrames.isEmpty else { return }
+    }
 
-        let updates = Self.computeNeighborUpdates(resizedOld: old, resizedNew: new, candidates: candidateFrames)
+    // Wendet berechnete Nachbar-Updates real an (axSetFrame) und schaltet die
+    // AXObserver-Notification-Kette kurz stumm — verhindert, dass follow()
+    // dieselbe, gerade hier ausgelöste Änderung noch einmal selbst verarbeitet
+    // (Feedback-Schleife). `candidates` muss dieselbe Reihenfolge haben, mit
+    // der `updates` berechnet wurde (siehe computeNeighborUpdates).
+    func applyNeighborUpdates(_ updates: [Int: CGRect], to candidates: [(ax: AXUIElement, frame: CGRect)]) {
         guard !updates.isEmpty else { return }
-
         suppress(for: 0.4)
-        for (candidateIdx, frame) in updates {
-            let watchedIdx = candidateIndices[candidateIdx]
-            axSetFrame(watched[watchedIdx].ax, frame)
-            watched[watchedIdx].lastFrame = axFrame(watched[watchedIdx].ax) ?? frame
+        for (idx, frame) in updates {
+            guard candidates.indices.contains(idx) else { continue }
+            let ax = candidates[idx].ax
+            axSetFrame(ax, frame)
+            refreshBaseline(ax, frame: axFrame(ax) ?? frame)
         }
+    }
+
+    // Aktualisiert die Baseline eines beobachteten Fensters direkt, ohne auf
+    // die nächste (möglicherweise stummgeschaltete) AX-Notification zu
+    // warten — vom Tracker beim Loslassen genutzt, damit weder das gezogene
+    // Fenster noch seine Nachbarn eine veraltete Baseline in die
+    // Suppress-Pause mitnehmen.
+    func refreshBaseline(_ ax: AXUIElement, frame: CGRect) {
+        guard let idx = watched.firstIndex(where: { CFEqual($0.ax, ax) }) else { return }
+        watched[idx].lastFrame = frame
     }
 
     // MARK: Reine Geometrie — testbar ohne AX.

@@ -50,7 +50,6 @@ final class LoopMenuView: NSView {
     private var sectorLayers: [CAShapeLayer] = []
     private var iconLayers: [CALayer] = []
     private var baseIcons: [NSImage?] = []
-    private var centerLabel: NSTextField!
     private var highlighted = -1
     // Welche Pfeiltasten gerade physisch gedrückt gehalten werden — zwei
     // gleichzeitig (z. B. ← + ↑) fahren die entsprechende Ecke an, statt
@@ -61,14 +60,6 @@ final class LoopMenuView: NSView {
         super.init(frame: NSRect(origin: .zero, size: Self.viewSize))
         wantsLayer = true
         buildLayers()
-        centerLabel = NSTextField(labelWithString: "")
-        centerLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        centerLabel.alignment = .center
-        centerLabel.textColor = .labelColor
-        centerLabel.lineBreakMode = .byWordWrapping
-        centerLabel.frame = NSRect(x: bounds.midX - Self.innerRadius, y: bounds.midY - 14,
-                                   width: Self.innerRadius * 2, height: 28)
-        addSubview(centerLabel)
         updateAppearanceColors()
     }
 
@@ -77,14 +68,14 @@ final class LoopMenuView: NSView {
     func configure(_ ctx: Context) {
         context = ctx
         current = nil
-        // Start immer solo — F/Rechtsklick cycled ab da weiter zu 3 größte,
+        // Start-Modus kommt aus den Einstellungen (Default: solo) — F/
+        // Rechtsklick cycled ab da innerhalb der Sitzung weiter zu 3 größte,
         // dann alle Nachbarn (der Modus, in dem sich Fenster bei zu wenig
         // Restfläche überdecken können).
-        fillMode = .solo
+        fillMode = SettingsStore.shared.defaultFillMode
         extrasIndex = 0
         highlighted = -1
         sectorLayers.forEach { $0.fillColor = NSColor.clear.cgColor }
-        centerLabel.stringValue = "Maus bewegen oder\nTaste drücken"
     }
 
     // Der Anker (Monitor unter der Maus) hat sich geändert — Overlay.swift
@@ -104,12 +95,7 @@ final class LoopMenuView: NSView {
     // unter dem Zeiger liegt (der ist ja irgendwo im Quadranten, nicht im Ring).
     func mouseUpdate(zone: BentoZone, variant: EdgeVariant) {
         let action = LoopAction.zone(zone, variant: variant)
-        if let idx = Self.zones.firstIndex(of: zone), idx != highlighted {
-            if highlighted >= 0 { sectorLayers[highlighted].fillColor = NSColor.clear.cgColor }
-            sectorLayers[idx].fillColor = NSColor.controlAccentColor.withAlphaComponent(0.55).cgColor
-            highlighted = idx
-        }
-        guard action != current else { return }
+        guard action != current else { return }   // vermeidet unnötige previewFrames()-Neuberechnung bei stabilem Hover
         setCurrent(action)
     }
 
@@ -321,7 +307,7 @@ final class LoopMenuView: NSView {
         onCommit?(action, fillMode)
     }
 
-    // MARK: Gemeinsamer Zustand -> Vorschau + Mitte-Label
+    // MARK: Gemeinsamer Zustand -> Vorschau + Ring-Highlight
 
     private func setCurrent(_ action: LoopAction) {
         if action != current {
@@ -329,16 +315,31 @@ final class LoopMenuView: NSView {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         }
         current = action
-        centerLabel.stringValue = Self.label(for: action) + Self.fillSuffix(fillMode)
+        syncHighlight()
         onPreview?(previewFrames(for: action))
     }
 
-    private static func fillSuffix(_ mode: LoopFillMode) -> String {
-        switch mode {
-        case .solo: return ""
-        case .topThree: return "\n+ 3 größte"
-        case .all: return "\n+ alle"
+    // Sektor-Index für eine Aktion, falls sie einem Rand/einer Ecke
+    // entspricht (sonst nil — .general/.extra/.hide/… haben keinen Ring-Sektor).
+    private func zoneIndex(for action: LoopAction?) -> Int? {
+        switch action {
+        case .edge(let z, _), .corner(let z, _): return Self.zones.firstIndex(of: z)
+        default: return nil
         }
+    }
+
+    // Einziger Ort, der sectorLayers[...].fillColor/highlighted mutiert —
+    // läuft für Maus- UND Tastatur-Pfad über setCurrent() hierher (vorher
+    // aktualisierte nur der 60Hz-Mausposition-Poll den Ring, Tastatur-
+    // Auswahl blieb optisch stehen). Der Gleichheits-Guard verhindert
+    // redundante CALayer-Writes, u. a. wenn cycleFillMode() bewusst erneut
+    // setCurrent() mit unveränderter Aktion aufruft.
+    private func syncHighlight() {
+        let idx = zoneIndex(for: current) ?? -1
+        guard idx != highlighted else { return }
+        if highlighted >= 0 { sectorLayers[highlighted].fillColor = NSColor.clear.cgColor }
+        if idx >= 0 { sectorLayers[idx].fillColor = NSColor.controlAccentColor.withAlphaComponent(0.55).cgColor }
+        highlighted = idx
     }
 
     // Liefert ALLE Rechtecke, die beim Commit tatsächlich gesetzt würden —
@@ -412,46 +413,6 @@ final class LoopMenuView: NSView {
         return d
     }
 
-    private static func label(for action: LoopAction) -> String {
-        switch action {
-        case .edge(let z, let v), .corner(let z, let v):
-            return v == .half ? "\(zoneName(z))" : "\(zoneName(z)) · \(variantName(v))"
-        case .general(.maximize): return "Maximieren"
-        case .general(.almostMaximize): return "Fast maximieren"
-        case .general(.maximizeHeight): return "Volle Höhe"
-        case .general(.maximizeWidth): return "Volle Breite"
-        case .general(.center): return "Zentrieren"
-        case .extra: return "Extra"
-        case .hide: return "Ausblenden"
-        case .minimize: return "Minimieren"
-        case .minimizeOthers: return "Andere minimieren"
-        case .stash: return "Wegschieben"
-        case .unstash: return "Zurückholen"
-        case .undo: return "Rückgängig"
-        case .throwToDisplay(let i): return "Monitor \(i + 1)"
-        }
-    }
-
-    private static func zoneName(_ z: BentoZone) -> String {
-        switch z {
-        case .left: return "Links"
-        case .right: return "Rechts"
-        case .top: return "Oben"
-        case .bottom: return "Unten"
-        case .topLeft: return "Oben-Links"
-        case .topRight: return "Oben-Rechts"
-        case .bottomLeft: return "Unten-Links"
-        case .bottomRight: return "Unten-Rechts"
-        }
-    }
-
-    private static func variantName(_ v: EdgeVariant) -> String {
-        switch v {
-        case .half: return "Hälfte"
-        case .third: return "Drittel"
-        case .twoThirds: return "Zwei Drittel"
-        }
-    }
 }
 
 // Fängt während des Loop-Modus JEDEN Klick auf dem Anker-Monitor ab und
@@ -524,8 +485,8 @@ final class LoopRingPanel {
 // Fenster-Bauweise wie DragSnapManager.showPreview/hidePreview (DragSnap.swift
 // bleibt unangetastet, deshalb hier bewusst dupliziert statt geteilt).
 // Level knapp UNTER dem Overlay-Fenster (.floating): sichtbar über normalen
-// Fenstern, darf aber nie die Bühne selbst verdecken (die während der reinen
-// Auswahl auf der Bühne ja weiter sichtbar bleibt, anders als im Loop-Modus).
+// Fenstern, darf aber nie das Podium selbst verdecken (die während der reinen
+// Auswahl auf dem Podium ja weiter sichtbar bleibt, anders als im Loop-Modus).
 final class LoopPreviewPanel {
     private static let level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
     private var window: NSWindow?

@@ -73,13 +73,13 @@ final class SettingsStore {
         get { flag("dragSnap", default: true) }
         set { setFlag("dragSnap", newValue) }
     }
-    // Bühne: Fenster nach App gruppieren (mit Gruppenkopf) statt als eine
+    // Podium: Fenster nach App gruppieren (mit Gruppenkopf) statt als eine
     // flache, nur nach Z-Order sortierte Liste.
     var stageGroupByApp: Bool {
         get { flag("stageGroupByApp", default: true) }
         set { setFlag("stageGroupByApp", newValue) }
     }
-    // Interaktionsmodell der Bühne: false = Enter/Klick öffnen den Loop-Modus
+    // Interaktionsmodell des Podiums: false = Enter/Klick öffnen den Loop-Modus
     // (⌘↵/Doppelklick wechseln nur), true = Enter/Klick wechseln nur wie ein
     // klassischer Switcher (Loop-Modus über ⌘↵). Die Leertaste ist in beiden
     // Modi fürs Auto-Arrange-Häkchen reserviert (siehe tileCheckToggled).
@@ -124,13 +124,27 @@ final class SettingsStore {
         NotificationCenter.default.post(name: Self.changed, object: nil)
     }
 
-    // Breite einer Bühnen-Kachel — Höhe folgt im festen Seitenverhältnis von
+    // Breite einer Podiums-Kachel — Höhe folgt im festen Seitenverhältnis von
     // Tuning.stageTileSize. Größere Kacheln lassen pro Zeile weniger Platz,
-    // die Bühne bricht dann automatisch mehrzeilig um (bestehende
+    // das Podium bricht dann automatisch mehrzeilig um (bestehende
     // Flow-Layout-Logik in StageView, unverändert).
     var stageTileWidth: CGFloat {
         get { number("stageTileWidth", default: Tuning.stageTileSize.width) }
         set { setNumber("stageTileWidth", newValue) }
+    }
+
+    // MARK: Loop-Modus
+
+    // Füllmodus, mit dem der Loop-Ring bei jeder neuen Sitzung startet (F/
+    // Rechtsklick cyclen innerhalb der Sitzung live weiter). Ohne gespeicherten
+    // Wert liefert d.integer(forKey:) 0 zurück — das ist bereits
+    // LoopFillMode.solo.rawValue, also kein gesonderter Existenz-Check nötig.
+    var defaultFillMode: LoopFillMode {
+        get { LoopFillMode(rawValue: d.integer(forKey: "defaultFillMode")) ?? .solo }
+        set {
+            d.set(newValue.rawValue, forKey: "defaultFillMode")
+            NotificationCenter.default.post(name: Self.changed, object: nil)
+        }
     }
 
     // MARK: Monitor-Farben
@@ -290,6 +304,7 @@ final class SettingsWindowController: NSWindowController {
     private let contentContainer = NSView()
     private var sidebarButtons: [NSButton] = []
     private var layoutsList: NSStackView?
+    private var groupsList: NSStackView?
 
     convenience init() {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 520),
@@ -413,21 +428,15 @@ final class SettingsWindowController: NSWindowController {
 
     private func paneAllgemein() -> NSView {
         let st = stack()
-        st.addArrangedSubview(sectionHeader("Kurzbefehle"))
-        let row = NSStackView(views: [label("Bühne ein-/ausblenden:"), ShortcutRecorderButton()])
-        row.spacing = 10
-        st.addArrangedSubview(row)
-        st.addArrangedSubview(hintLabel("Direkt-Hotkeys ohne Overlay (Hälften, Drittel, Ecken, Monitor-Wurf, …) sind unter „Hotkeys“ frei belegbar."))
-        st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Verhalten"))
         st.addArrangedSubview(toggleRow("Enter/Klick wechselt nur (Loop-Modus über ⌘↵)",
             "An: Enter/Klick fokussieren das Fenster und schließen (klassischer Switcher), ⌘↵ öffnet den Loop-Modus. Aus: Enter/Klick öffnen den Loop-Modus, ⌘↵ oder Doppelklick wechseln nur. In beiden Modi: Leertaste kreuzt ein Fenster fürs Auto-Arrange an — bei ≥2 Häkchen verteilt Enter sie proportional auf alle Monitore.",
             isOn: SettingsStore.shared.stageEnterSwitches, action: #selector(toggleEnterSwitches(_:))))
         st.addArrangedSubview(toggleRow("Hintergrund-Fenster beim Schließen minimieren",
-            "Bühnen-Fenster wandern ins Dock, wenn das Overlay zugeht (floatende ausgenommen).",
+            "Podiums-Fenster wandern ins Dock, wenn das Overlay zugeht (floatende ausgenommen).",
             isOn: SettingsStore.shared.autoMinimize, action: #selector(toggleAutoMinimize(_:))))
         st.addArrangedSubview(toggleRow("Verbundene Ränder",
-            "Hältst du beim Ziehen der echten Fensterkante zusätzlich ⌃ (Control), passen sich angrenzende Fenster automatisch an. Ohne ⌃ resizt jedes Fenster wie gewohnt für sich allein (⇧ und ⌥ sind beim Resizen bereits von macOS selbst belegt).",
+            "Ziehst du eine echte Fensterkante langsam, passen sich angrenzende Fenster automatisch mit an — schnell/ruckartig gezogen bleiben sie unberührt. Keine Taste nötig; ⌃ (Control) gehalten erzwingt trotzdem immer verbunden, unabhängig vom Tempo (Sicherheitsnetz für Trackpad/Motorik).",
             isOn: SettingsStore.shared.linkedEdges, action: #selector(toggleLinked(_:))))
         st.addArrangedSubview(toggleRow("Layouts automatisch anwenden",
             "Beim Erkennen eines gespeicherten Monitor-Setups das Layout wiederherstellen.",
@@ -435,13 +444,31 @@ final class SettingsWindowController: NSWindowController {
         st.addArrangedSubview(toggleRow("Drag-to-Edge-Snap",
             "Ein Fenster an den Bildschirmrand ziehen füllt die halbe Fläche — zwei so gezogene Fenster ergeben einen Split.",
             isOn: SettingsStore.shared.dragSnap, action: #selector(toggleDragSnap(_:))))
+        st.addArrangedSubview(separator())
+        st.addArrangedSubview(sectionHeader("Loop-Modus"))
+        let fillPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        fillPopup.addItems(withTitles: ["Solo", "3 größte", "Alle"])
+        fillPopup.selectItem(at: SettingsStore.shared.defaultFillMode.rawValue)
+        fillPopup.target = self
+        fillPopup.action = #selector(fillModeChanged(_:))
+        let fillRow = NSStackView(views: [label("Start-Füllmodus:"), fillPopup])
+        fillRow.spacing = 10
+        st.addArrangedSubview(fillRow)
+        st.addArrangedSubview(hintLabel("Womit eine neue Loop-Sitzung beginnt. F oder Rechtsklick cyclen innerhalb der Sitzung live weiter: Solo → 3 größte Nachbarn → alle Nachbarn."))
         return st
     }
 
     // Eine Zeile pro Direkt-Aktion: Name + Recorder + Löschen. Frei belegbar,
-    // die klassischen ⌃⌥-Kürzel sind Werks-Defaults.
+    // die klassischen ⌃⌥-Kürzel sind Werks-Defaults. Der Aktivierungs-Hotkey
+    // (Podium ein-/ausblenden) steht oben mit auf dieser Seite — alle
+    // globalen Hotkeys an einem Ort, statt über Allgemein/Hotkeys verteilt.
     private func paneHotkeys() -> NSView {
         let st = stack()
+        st.addArrangedSubview(sectionHeader("Aktivierung"))
+        let activationRow = NSStackView(views: [label("Podium ein-/ausblenden:"), ShortcutRecorderButton()])
+        activationRow.spacing = 10
+        st.addArrangedSubview(activationRow)
+        st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Direkt-Hotkeys (ohne Overlay)"))
         st.addArrangedSubview(hintLabel("Wirken sofort auf das fokussierte Fenster der vordersten App. Klick auf die Taste nimmt eine neue Kombination auf (Escape bricht ab), – löscht die Belegung."))
 
@@ -499,17 +526,17 @@ final class SettingsWindowController: NSWindowController {
 
     private func paneDarstellung() -> NSView {
         let st = stack()
-        st.addArrangedSubview(sectionHeader("Bühne"))
+        st.addArrangedSubview(sectionHeader("Podium"))
         st.addArrangedSubview(toggleRow("Fenster nach App gruppieren",
             "Gruppenkopf mit Icon/Name/Anzahl je App statt einer flachen, nur nach Z-Order sortierten Liste.",
             isOn: SettingsStore.shared.stageGroupByApp, action: #selector(toggleGroupByApp(_:))))
         let sizeRow = NSStackView(views: [label("Kachelgröße:"), tileSizeSlider()])
         sizeRow.spacing = 10
         st.addArrangedSubview(sizeRow)
-        st.addArrangedSubview(hintLabel("Größere Kacheln zeigen mehr vom Fenster, lassen aber weniger pro Zeile zu — die Bühne wächst dann passend in die Höhe und wird mehrzeilig."))
+        st.addArrangedSubview(hintLabel("Größere Kacheln zeigen mehr vom Fenster, lassen aber weniger pro Zeile zu — das Podium wächst dann passend in die Höhe und wird mehrzeilig."))
         st.addArrangedSubview(separator())
         st.addArrangedSubview(sectionHeader("Monitor-Farben"))
-        st.addArrangedSubview(hintLabel("Farbe für Badge, Rahmen und Bühnen-Punkt je Monitor (von links nach rechts)."))
+        st.addArrangedSubview(hintLabel("Farbe für Badge, Rahmen und Podiums-Punkt je Monitor (von links nach rechts)."))
         let colors = SettingsStore.shared.monitorColors
         for i in 0..<4 {
             let well = NSColorWell()
@@ -556,7 +583,64 @@ final class SettingsWindowController: NSWindowController {
         }
         st.addArrangedSubview(floatEditor)
         st.addArrangedSubview(hintLabel("Finder und Systemeinstellungen sind zusätzlich fest per Bundle-ID hinterlegt."))
+        st.addArrangedSubview(separator())
+        st.addArrangedSubview(sectionHeader("Gruppen (Auto-Arrange)"))
+        st.addArrangedSubview(hintLabel("Angekreuzte Fenster derselben Gruppe landen beim Auto-Arrange garantiert auf demselben Monitor (ein App-Name pro Zeile, wie oben)."))
+        let groupsList = NSStackView()
+        groupsList.orientation = .vertical
+        groupsList.alignment = .leading
+        groupsList.spacing = 8
+        self.groupsList = groupsList
+        st.addArrangedSubview(groupsList)
+        rebuildGroupsList()
+        let addGroup = NSButton(title: "＋ Gruppe hinzufügen", target: self, action: #selector(addGroupClicked(_:)))
+        st.addArrangedSubview(addGroup)
         return st
+    }
+
+    private func rebuildGroupsList() {
+        guard let list = groupsList else { return }
+        list.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if cfg.groups.isEmpty {
+            list.addArrangedSubview(hintLabel("Noch keine Gruppen angelegt."))
+            return
+        }
+        // Stabile Anzeige-Reihenfolge (Dictionary hat keine) — alphabetisch.
+        for name in cfg.groups.keys.sorted() {
+            let row = NSStackView()
+            row.orientation = .vertical
+            row.alignment = .leading
+            row.spacing = 4
+            let del = NSButton(title: "Löschen", target: self, action: #selector(deleteGroupClicked(_:)))
+            del.identifier = NSUserInterfaceItemIdentifier(name)
+            let header = NSStackView(views: [label(name), del])
+            header.spacing = 8
+            row.addArrangedSubview(header)
+            let editor = AppListEditor(lines: cfg.groups[name] ?? [], height: 60)
+            editor.onChange = { [weak self] apps in
+                self?.cfg.groups[name] = apps
+                self?.cfg.save()
+            }
+            row.addArrangedSubview(editor)
+            list.addArrangedSubview(row)
+            list.addArrangedSubview(separator())
+        }
+    }
+
+    @objc private func addGroupClicked(_ sender: NSButton) {
+        var n = 1
+        var name = "Gruppe \(n)"
+        while cfg.groups[name] != nil { n += 1; name = "Gruppe \(n)" }
+        cfg.groups[name] = []
+        cfg.save()
+        rebuildGroupsList()
+    }
+
+    @objc private func deleteGroupClicked(_ sender: NSButton) {
+        guard let name = sender.identifier?.rawValue else { return }
+        cfg.groups.removeValue(forKey: name)
+        cfg.save()
+        rebuildGroupsList()
     }
 
     private func paneTastatur() -> NSView {
@@ -643,6 +727,9 @@ final class SettingsWindowController: NSWindowController {
     @objc private func toggleGroupByApp(_ sender: NSButton) { SettingsStore.shared.stageGroupByApp = sender.state == .on }
     @objc private func toggleEnterSwitches(_ sender: NSButton) { SettingsStore.shared.stageEnterSwitches = sender.state == .on }
     @objc private func tileSizeChanged(_ sender: NSSlider) { SettingsStore.shared.stageTileWidth = CGFloat(sender.doubleValue) }
+    @objc private func fillModeChanged(_ sender: NSPopUpButton) {
+        SettingsStore.shared.defaultFillMode = LoopFillMode(rawValue: sender.indexOfSelectedItem) ?? .solo
+    }
 
     @objc private func colorChanged(_ well: NSColorWell) {
         SettingsStore.shared.setMonitorColor(well.color, at: well.tag)

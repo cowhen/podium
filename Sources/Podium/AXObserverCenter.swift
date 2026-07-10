@@ -37,7 +37,7 @@ final class AXObserverCenter {
 
     private func cleanUp(pid: pid_t) {
         if let obs = observers.removeValue(forKey: pid) {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
         }
         subs = subs.filter { $0.value.pid != pid }
     }
@@ -80,7 +80,13 @@ final class AXObserverCenter {
             }
         }
         guard AXObserverCreate(pid, callback, &obs) == .success, let obs else { return nil }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+        // .commonModes statt .defaultMode: der Default-Mode pausiert während
+        // Tracking-Loops (z. B. während Podium selbst ein Menü/einen Drag
+        // tracked) — genau dasselbe Muster, das die beiden Maus-Poll-Timer im
+        // Overlay schon mal lahmgelegt hat (siehe dortige Kommentare). Ohne
+        // das hier würden Resize/Move/Destroy-Notifications für beobachtete
+        // Fenster in solchen Momenten verschluckt, nicht nur verzögert.
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
         observers[pid] = obs
         return obs
     }

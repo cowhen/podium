@@ -41,7 +41,7 @@ enum Onboarding {
             content.addArrangedSubview(b)
         }
 
-        para("⌥⇥ öffnet die Bühne",
+        para("⌥⇥ öffnet das Podium",
              "Alle Fenster an einer Stelle, gruppiert nach App. Tippen filtert, Pfeiltasten wählen — das aktive Fenster ist schon ausgewählt. ↵ oder Klick öffnet den Loop-Modus (per Maus oder Tastatur positionieren, ↵/Klick wendet an); ⌘↵ oder Doppelklick wechselt nur zum Fenster. In den Einstellungen lässt sich das umdrehen (↵ wechselt, Leertaste positioniert). Escape rollt alles zurück.")
         para("Zwei Berechtigungen nötig",
              "Bedienungshilfen (Fenster bewegen) und Bildschirmaufnahme (Vorschaubilder). Beide unter Systemeinstellungen → Datenschutz & Sicherheit freigeben — PODIUM fragt beim ersten Start automatisch.")

@@ -2,7 +2,7 @@ import CoreGraphics
 
 // App-Lebenszeit-Gedächtnis für "Undo/Ursprungsgröße" im Loop-Modus — merkt
 // sich pro Fenster den allerersten Frame, den Podium in dieser Sitzung
-// angetroffen hat, unabhängig davon, ob die Bühne zwischenzeitlich
+// angetroffen hat, unabhängig davon, ob das Podium zwischenzeitlich
 // geschlossen/neu geöffnet wurde (wie Loop's WindowRecords).
 final class WindowHistory {
     static let shared = WindowHistory()

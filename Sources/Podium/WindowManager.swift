@@ -30,7 +30,7 @@ final class WindowManager {
         let cgList = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]) ?? []
         // Vollständige Liste (inkl. Offscreen) für MINIMIERTE Fenster — die
-        // fehlen in der OnScreen-Liste, sollen aber auf der Bühne erscheinen,
+        // fehlen in der OnScreen-Liste, sollen aber auf dem Podium erscheinen,
         // sonst verliert man sie nach dem Auto-Minimieren komplett.
         let cgAll = (CGWindowListCopyWindowInfo([.excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]]) ?? []

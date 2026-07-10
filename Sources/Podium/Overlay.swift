@@ -2,7 +2,7 @@ import AppKit
 
 // Randloses Fenster, das trotzdem Key werden kann. Tastatur geht komplett an
 // den Controller: Enter/Klick positioniert (Loop-Modus), Escape rollt zurück
-// bzw. verlässt den Loop-Modus, jedes andere Zeichen filtert die Bühne.
+// bzw. verlässt den Loop-Modus, jedes andere Zeichen filtert das Podium.
 final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override func keyDown(with event: NSEvent) {
@@ -27,18 +27,18 @@ private final class StageClickCatcherView: NSView {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
-// "Bühne": alle verwalteten Fenster an einer Stelle, gruppiert nach App.
+// Podium: alle verwalteten Fenster an einer Stelle, gruppiert nach App.
 // Auswahl per Tastatur/Suche/Klick, Enter oder Klick öffnet für das gewählte
 // Fenster den Loop-Modus (Ring-Menü) zur Positionierung — GENAU EIN Fenster
 // pro Aktion, keine Karte/Box-Anordnung mehr. Jede Aktion wirkt sofort auf die
-// echten Fenster; Escape auf der Bühne stellt den Zustand beim Öffnen wieder her.
+// echten Fenster; Escape auf dem Podium stellt den Zustand beim Öffnen wieder her.
 final class OverlayController: NSObject, NSWindowDelegate {
     static let shared = OverlayController()
 
     private var window: OverlayWindow?
     private var stageView: StageView?
     private var searchLabel: NSTextField?
-    // Z-Order aller Fenster beim Öffnen — sortiert die Bühne stabil.
+    // Z-Order aller Fenster beim Öffnen — sortiert das Podium stabil.
     private var zRank: [CGWindowID: Int] = [:]
     private var displays: [Display] = []
     private var displayColors: [CGDirectDisplayID: NSColor] = [:]
@@ -54,7 +54,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var lastCommitted: WinInfo?
     private var stageMaxWidth: CGFloat = Tuning.stageMaxWidthFloor
     private var search = ""
-    private var fixedTopHeight: CGFloat = 0   // alles über der Bühne, für dynamische Fensterhöhe
+    private var fixedTopHeight: CGFloat = 0   // alles über dem Podium, für dynamische Fensterhöhe
     private var maxContentHeight: CGFloat = .greatestFiniteMagnitude
     private var innerWidth: CGFloat = 0       // Inhaltsbreite (ohne Padding), fix nach dem Aufbau
 
@@ -70,7 +70,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Ein Klick-Fang-Fenster pro Monitor, siehe setupStageClickCatchers().
     private var stageClickCatchers: [NSWindow] = []
 
-    // Tastatur-Zustand: genau eine Auswahl auf der Bühne.
+    // Tastatur-Zustand: genau eine Auswahl auf dem Podium.
     private enum Dir { case left, right, up, down }
     private var selectedID: CGWindowID?
     private var footerLabel: NSTextField?
@@ -144,7 +144,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         checked = []
 
         // Verbundene Ränder auch für Fenster anmelden, die von Hand (nicht
-        // über Podium) nebeneinandergeschoben wurden — sobald die Bühne
+        // über Podium) nebeneinandergeschoben wurden — sobald das Podium
         // einmal offen war, kennt LinkedEdges sie und kann bei künftigem
         // Resize live erkennen, ob sie wirklich angrenzen.
         let tileable = allWins.filter { !isFloatingWin($0) && !$0.minimized }
@@ -173,7 +173,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         teardown()
     }
 
-    // Escape auf der Bühne: alle Fenster auf den Zustand beim Öffnen
+    // Escape auf dem Podium: alle Fenster auf den Zustand beim Öffnen
     // zurücksetzen — Frames UND Sichtbarkeit (per Loop ausgeblendete Apps
     // wieder einblenden, unfreiwillig Minimiertes zurückholen).
     func revert() {
@@ -251,7 +251,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         default: break
         }
 
-        // Fenster-Aktionen direkt auf der Bühne (ohne Loop-Modus-Umweg).
+        // Fenster-Aktionen direkt auf dem Podium (ohne Loop-Modus-Umweg).
         if cmd, let s = event.charactersIgnoringModifiers?.lowercased() {
             switch s {
             case "m": if let w = selectedInfo() { minimizeFromStage(w) }; return true
@@ -271,7 +271,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func setSearch(_ q: String) {
         search = q
-        searchLabel?.stringValue = q.isEmpty ? "Tippen filtert die Bühne" : "⌕ \(q)"
+        searchLabel?.stringValue = q.isEmpty ? "Tippen filtert das Podium" : "⌕ \(q)"
         searchLabel?.textColor = q.isEmpty ? .tertiaryLabelColor : .labelColor
         refreshStage()
         // Ring auf den ersten Treffer — Pfeile wandern dann durch Treffer.
@@ -331,19 +331,52 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Verteilt die angekreuzten Fenster proportional zur Monitorfläche auf
     // alle aktuellen Displays (größere Monitore bekommen mehr Fenster), pro
     // Monitor dann als möglichst quadratisches Auto-Raster (LoopEngine.autoGrid).
-    // Reicht der Platz auf einem Monitor nicht für alle ihm zugeteilten
-    // Fenster in Mindestgröße, lässt autoGrid die überzähligen bewusst unangetastet.
+    // Fenster, deren App in einer Settings-Gruppe (cfg.groups) liegt, werden
+    // dafür zu EINEM Bucket zusammengefasst und landen garantiert auf
+    // demselben Monitor — LoopEngine.assignBucketsToDisplays sorgt dafür,
+    // dass kein Bucket aufgeteilt wird, auch wenn er dafür ein Display
+    // relativ zu dessen Flächenanteil überbucht. Reicht der Platz auf einem
+    // Monitor nicht für alle ihm zugeteilten Fenster in Mindestgröße, lässt
+    // autoGrid die überzähligen bewusst unangetastet — bei Gruppen ist ein
+    // solches Überbuchen wahrscheinlicher als bei reiner Flächen-Verteilung,
+    // das ist der bewusste Kompromiss dafür, dass Gruppen nie aufgesplittet werden.
     private func autoArrange(_ infos: [WinInfo]) {
         guard !infos.isEmpty else { return }
         LinkedEdges.shared.suppress()
+
+        // Buckets: Gruppen-Fenster kollabieren in EINEN Bucket am
+        // Erstauftreten in der Ankreuz-Reihenfolge (infos ist bereits in
+        // checked-Reihenfolge); ungruppierte Fenster bleiben Singleton-
+        // Buckets. cfg.groups selbst wird nur für die Name->Gruppenname-
+        // Rückwärtssuche durchlaufen (Namenskollision zwischen Gruppen:
+        // letzter Dictionary-Eintrag gewinnt) — niemals für Bucket-Reihenfolge.
+        var groupNameForApp: [String: String] = [:]
+        for (gname, apps) in cfg.groups { for app in apps { groupNameForApp[app] = gname } }
+        var buckets: [[WinInfo]] = []
+        var bucketIndexForGroup: [String: Int] = [:]
+        for info in infos {
+            if let gname = groupNameForApp[info.app] {
+                if let idx = bucketIndexForGroup[gname] {
+                    buckets[idx].append(info)
+                } else {
+                    bucketIndexForGroup[gname] = buckets.count
+                    buckets.append([info])
+                }
+            } else {
+                buckets.append([info])
+            }
+        }
+
         let sortedDisplays = displays.sorted { $0.visible.width * $0.visible.height > $1.visible.width * $1.visible.height }
         let weights = sortedDisplays.map { $0.visible.width * $0.visible.height }
-        let counts = LoopEngine.allocateByWeight(total: infos.count, weights: weights)
-        var idx = 0
-        for (display, count) in zip(sortedDisplays, counts) {
-            guard count > 0 else { continue }
-            let group = Array(infos[idx..<min(idx + count, infos.count)])
-            idx += count
+        let targetCounts = LoopEngine.allocateByWeight(total: infos.count, weights: weights)
+        let bucketDisplayIdx = LoopEngine.assignBucketsToDisplays(bucketSizes: buckets.map { $0.count }, targetCounts: targetCounts)
+
+        var perDisplay: [[WinInfo]] = Array(repeating: [], count: sortedDisplays.count)
+        for (bucket, dIdx) in zip(buckets, bucketDisplayIdx) { perDisplay[dIdx].append(contentsOf: bucket) }
+
+        for (display, group) in zip(sortedDisplays, perDisplay) {
+            guard !group.isEmpty else { continue }
             let frames = LoopEngine.autoGrid(count: group.count, in: display.visible)
             for (info, frame) in zip(group, frames) {
                 if let cur = axFrame(info.ax) { WindowHistory.shared.recordIfNeeded(info.windowID, currentFrame: cur) }
@@ -417,7 +450,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     // Setzt das zuvor vorgezogene Fenster wieder auf seinen ursprünglichen
-    // Platz zurück: alle Fenster, die beim Öffnen der Bühne davor lagen,
+    // Platz zurück: alle Fenster, die beim Öffnen des Podiums davor lagen,
     // in ihrer ursprünglichen Reihenfolge erneut anheben (von hinten nach
     // vorn) — das zurückgesetzte Fenster selbst bleibt unangetastet und
     // rutscht so wieder hinter sie. axRaise ändert nur die Fenster-Server-
@@ -435,7 +468,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func updateFooter() {
         footerLabel?.stringValue = loopMenuView != nil
             ? "←→↑↓ Rand   U I J K Ecken   E/⇧E Extras   F/Rechtsklick Füllen   M A H W C Allgemein   Z/⇧Z Minimieren   X Ausblenden   S/⇧S Stash   ⌘Z Rückgängig   1–9 Monitor   ⇥/⇧⇥ Wechseln   ↵ anwenden   Esc zurück"
-            : "tippen filtert   ←→↑↓ wählen   ↵ / Klick positionieren   Leertaste Auto-Arrange-Häkchen   ⌃+Ziehen verbindet Ränder   ? Hilfe"
+            : "tippen filtert   ←→↑↓ wählen   ↵ / Klick positionieren   Leertaste Auto-Arrange-Häkchen   langsam ziehen verbindet Ränder   ? Hilfe"
         footerLabel?.textColor = loopMenuView != nil ? .systemOrange : .tertiaryLabelColor
     }
 
@@ -492,7 +525,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         maxContentHeight = (vis.height * 0.85).rounded()
         let availW = (vis.width * 0.75).rounded() - padding * 2
 
-        // Bühne erst am 75%-Maximum layouten und messen, dann die Breite auf
+        // Podium erst am 75%-Maximum layouten und messen, dann die Breite auf
         // den tatsächlichen Bedarf trimmen und ggf. enger neu umbrechen.
         let stageV = StageView(controller: self)
         stageV.setWindows(stageList(), filter: search, maxWidth: availW, dot: dotColor, floating: isFloatingWin, checked: { self.checked.contains($0.windowID) })
@@ -540,15 +573,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         sheen.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
         bg.addSubview(sheen)
 
-        // Kopfzeile der Bühne: Titel links, Suche rechts.
+        // Kopfzeile des Podiums: Titel links, Suche rechts.
         let headerY = padding
-        let title = NSTextField(labelWithString: "Bühne · nach App")
+        let title = NSTextField(labelWithString: "Podium · nach App")
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         title.textColor = .secondaryLabelColor
         title.frame = NSRect(x: padding, y: headerY, width: 240, height: 17)
         bg.addSubview(title)
 
-        let sl = NSTextField(labelWithString: "Tippen filtert die Bühne")
+        let sl = NSTextField(labelWithString: "Tippen filtert das Podium")
         sl.font = .systemFont(ofSize: 13)
         sl.textColor = .tertiaryLabelColor
         sl.alignment = .right
@@ -602,8 +635,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Loop-Modus, siehe dort): ein Klick auf das per Maus-Hover ausgewählte
     // echte Fenster bestätigt genau wie ↵ — ohne eigenes Fenster würde der
     // Klick zuerst die fremde App treffen (Button drücken, Link öffnen, …),
-    // bevor Podium überhaupt reagieren könnte. Direkt UNTER das Bühnen-
-    // Fenster einsortiert, damit Klicks auf die Bühne selbst (Kacheln,
+    // bevor Podium überhaupt reagieren könnte. Direkt UNTER das Podiums-
+    // Fenster einsortiert, damit Klicks auf das Podium selbst (Kacheln,
     // Hintergrund) unverändert bei ihr ankommen.
     private func setupStageClickCatchers() {
         guard let mainWin = window else { return }
@@ -639,7 +672,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // (sonst überschreibt der 60Hz-Poll ständig jede Pfeiltasten-Auswahl im
     // nächsten Tick wieder) und solange der Loop-Modus nicht offen ist (der
     // hat sein eigenes Tracking, siehe loopMouseMoved). Kein Treffer (leerer
-    // Schreibtisch oder Zeiger über der Bühne selbst) lässt die bestehende
+    // Schreibtisch oder Zeiger über dem Podium selbst) lässt die bestehende
     // Auswahl unverändert stehen.
     private func stageMouseMoved() {
         guard loopMenuView == nil else { return }
@@ -765,7 +798,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: Fenster-Aktionen auf der Bühne (⌘M/⌘H/⌘⌫ + Kontextmenü)
+    // MARK: Fenster-Aktionen auf dem Podium (⌘M/⌘H/⌘⌫ + Kontextmenü)
 
     private func minimizeFromStage(_ info: WinInfo) {
         axSetMinimized(info.ax, true)
@@ -825,7 +858,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     // X-Knopf einer Kachel: echtes Fenster schließen (drückt dessen roten
     // Schließen-Knopf — die App darf also noch "Sichern?" fragen) und von der
-    // Bühne entfernen.
+    // Podium entfernen.
     func closeRequested(_ info: WinInfo) {
         hidePreview()
         axClose(info.ax)
@@ -840,7 +873,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     // MARK: Loop-Modus
 
-    // Öffnet den Ring fürs gegebene Fenster: die ganze Bühne (das komplette
+    // Öffnet den Ring fürs gegebene Fenster: das ganze Podium (das komplette
     // Overlay-Fenster) verschwindet, sichtbar bleibt NUR der Ring (eigenes
     // schwebendes Panel) + die Live-Vorschau. Das Overlay-Fenster selbst
     // bleibt aber Key-Fenster (nur unsichtbar) — sonst würde die Tastatur
@@ -980,10 +1013,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // Viertel eingeschaltet, dann via BentoApply wie Drag-to-Edge/Radial).
     private func applyLoopAction(_ action: LoopAction, fillMode: LoopFillMode, to info: WinInfo) {
         // Nach dem Anwenden zurück aufs volle Board: closeLoopMode() blendet
-        // die Bühne wieder ein, setSearch("") löscht den Filter UND ruft
+        // das Podium wieder ein, setSearch("") löscht den Filter UND ruft
         // dabei refreshStage() bereits mit auf — kein separater Aufruf nötig.
         // zRank frisch lesen: Commits heben Fenster an, sonst arbeiten
-        // Bühnen-Sortierung und unraiseIfNeeded mit der Ordnung von vorher.
+        // Podiums-Sortierung und unraiseIfNeeded mit der Ordnung von vorher.
         defer {
             closeLoopMode()
             refreshAllBounds()
@@ -1090,7 +1123,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // bestimmt LinkedEdges bei jedem Resize ohnehin live neu — ein
         // Fenster zu beobachten, das gar nicht angrenzt, hat keinen Nachteil.
         // Fokus NICHT sofort setzen (axFocus aktiviert die App → Overlay
-        // verliert Key → Session-Abriss statt "zurück auf die Bühne") —
+        // verliert Key → Session-Abriss statt "zurück auf das Podium") —
         // stattdessen fürs Session-Ende vormerken, siehe close().
         switch action {
         case .hide, .minimize, .minimizeOthers, .stash:
@@ -1102,7 +1135,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: Bühne
+    // MARK: Podium
 
     // Alle verwalteten Fenster, Z-sortiert für stabile App-Gruppierung.
     private func stageList() -> [WinInfo] {
@@ -1110,7 +1143,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     // Bounds aller Fenster aus der Realität nachlesen — nach jeder Loop-Aktion,
-    // damit die Bühne (Thumbnails, Farbpunkt) den echten Zustand zeigt.
+    // damit das Podium (Thumbnails, Farbpunkt) den echten Zustand zeigt.
     private func refreshAllBounds() {
         allWins = allWins.map { w in axFrame(w.ax).map { w.with(bounds: $0) } ?? w }
     }
@@ -1123,8 +1156,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         updateSelectionUI()
     }
 
-    // Fensterhöhe folgt dem Bühnen-Inhalt (Oberkante bleibt fix) — kein toter
-    // Leerraum unter der Bühne, kein Abschneiden nach dem Schließen von Fenstern.
+    // Fensterhöhe folgt dem Podiums-Inhalt (Oberkante bleibt fix) — kein toter
+    // Leerraum unter dem Podium, kein Abschneiden nach dem Schließen von Fenstern.
     private func resizeToFitStage() {
         guard let win = window, let stageV = stageView else { return }
         let newH = min(fixedTopHeight + stageV.frame.height + 18 + 28, maxContentHeight)

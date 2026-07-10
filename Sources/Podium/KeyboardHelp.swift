@@ -7,7 +7,7 @@ enum KeyboardHelp {
 
     static let lines: [Line] = [
         Line(text: "BÜHNE", isHeader: true),
-        Line(text: "tippen  Bühne filtern (Ring springt zum Treffer)", isHeader: false),
+        Line(text: "tippen  Podium filtern (Ring springt zum Treffer)", isHeader: false),
         Line(text: "← → ↑ ↓  durch alle Fenster wählen", isHeader: false),
         Line(text: "Maus über ein echtes Fenster (auf den Monitoren)  wählt es aus, Klick bestätigt wie ↵", isHeader: false),
         Line(text: "↵ oder Klick  positionieren (Loop-Modus)   ·   ⌘↵ oder Doppelklick  nur wechseln", isHeader: false),
@@ -17,7 +17,8 @@ enum KeyboardHelp {
         Line(text: "⌘M  minimieren   ·   ⌘H  App ausblenden   ·   ⌘⌫  Fenster schließen", isHeader: false),
         Line(text: "Rechtsklick auf Kachel  Aktionsmenü (fokussieren, minimieren, App beenden, …)", isHeader: false),
         Line(text: "esc  Filter leeren / alles zurückrollen", isHeader: false),
-        Line(text: "⌃ beim Ziehen einer echten Fensterkante  verbundene Nachbarn resizen mit", isHeader: false),
+        Line(text: "langsam an einer echten Fensterkante ziehen  verbundene Nachbarn resizen mit (schnell ziehen = nicht)", isHeader: false),
+        Line(text: "⌃ dabei gehalten  erzwingt immer verbunden, unabhängig vom Zug-Tempo", isHeader: false),
         Line(text: "", isHeader: false),
         Line(text: "LOOP-MODUS", isHeader: true),
         Line(text: "← → ↑ ↓ (wiederholen cycled)  Rand: Hälfte → Drittel → zwei Drittel", isHeader: false),
@@ -29,7 +30,7 @@ enum KeyboardHelp {
         Line(text: "Z / ⇧Z  minimieren / andere minimieren   ·   X  ausblenden", isHeader: false),
         Line(text: "S / ⇧S  wegschieben / zurückholen   ·   ⌘Z  rückgängig", isHeader: false),
         Line(text: "1–9  auf Monitor werfen   ·   ⇥ / ⇧⇥  zum Nachbar-Monitor wechseln", isHeader: false),
-        Line(text: "↵ oder Klick  anwenden   ·   esc  zurück zur Bühne (Fenster bleibt unverändert)", isHeader: false),
+        Line(text: "↵ oder Klick  anwenden   ·   esc  zurück zum Podium (Fenster bleibt unverändert)", isHeader: false),
     ]
 
     // Globale Direkt-Hotkeys (ohne Overlay), siehe DirectActions — frei

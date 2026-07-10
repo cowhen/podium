@@ -1,6 +1,6 @@
 import AppKit
 
-// Gruppenkopf einer App auf der Bühne: Icon + Name + Anzahl.
+// Gruppenkopf einer App auf dem Podium: Icon + Name + Anzahl.
 final class GroupHeaderView: NSView {
     let app: String
     private let icon = NSImageView()
@@ -33,7 +33,7 @@ final class GroupHeaderView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-// Die Bühne: ALLE nicht zugeordneten Fenster in einer Fläche, gruppiert nach
+// Die Podium: ALLE nicht zugeordneten Fenster in einer Fläche, gruppiert nach
 // App (statt nach Monitor — die Position unsichtbarer Fenster ist fast
 // wertlose Information und verdient nur einen Farbpunkt, keine eigene Zeile).
 final class StageView: NSView {
@@ -61,7 +61,7 @@ final class StageView: NSView {
     // Einstellung abschaltbar — dann eine flache, nur nach Z-Order sortierte
     // Gruppe ohne Kopfzeile), Flow-Layout mit Umbruch bei maxWidth. filter
     // matcht App-Name oder Titel. Kachelgröße kommt aus den Einstellungen —
-    // größere Kacheln lassen weniger pro Zeile zu, die Bühne wächst dadurch
+    // größere Kacheln lassen weniger pro Zeile zu, das Podium wächst dadurch
     // automatisch mehrzeilig (dasselbe Umbruch-Verhalten wie eh schon).
     func setWindows(_ wins: [WinInfo], filter: String, maxWidth: CGFloat,
                     dot: (WinInfo) -> NSColor?, floating: (WinInfo) -> Bool = { _ in false },

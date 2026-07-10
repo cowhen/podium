@@ -25,7 +25,7 @@ func currentDisplays() -> [Display] {
     }
 }
 
-// Akzentfarbe pro Monitor-Index (Karte, Badges, Bühnen-Punkte): Farbe erfasst
+// Akzentfarbe pro Monitor-Index (Karte, Badges, Podiums-Punkte): Farbe erfasst
 // man schneller als Ziffern — die Nummer bleibt als zweiter Kanal erhalten.
 // Konfigurierbar über die Einstellungen (SettingsStore).
 func monitorAccent(_ index: Int) -> NSColor {

@@ -5,13 +5,17 @@ struct AppConfig {
     var ignoreNames: [String] = []
     var ignoreBundleIds: [String] = []
     var ignoreTitlePatterns: [String] = []
-    // "Floatend": nicht ignoriert (bleiben sichtbar, landen auf der Bühne),
+    // "Floatend": nicht ignoriert (bleiben sichtbar, landen auf dem Podium),
     // aber vom Kacheln ausgenommen — Drop auf eine Monitor-Box verschiebt sie
     // nur (zentriert, unverändert groß) und holt sie nach vorn, statt sie in
     // ein Split-Raster zu zwängen. Sinnvoll für Finder/Systemeinstellungen,
     // deren Größe man nicht von der App-Auswahl bestimmen lassen will.
     var floatingNames: [String] = []
     var floatingBundleIds: [String] = ["com.apple.finder", "com.apple.systempreferences"]
+    // Gruppenname -> Liste von App-Namen (exakter Match gegen WinInfo.app,
+    // wie ignoreNames/floatingNames). Beim Auto-Arrange landen alle
+    // angekreuzten Fenster derselben Gruppe garantiert auf demselben Monitor.
+    var groups: [String: [String]] = [:]
 
     func isFloating(pid: pid_t, name: String) -> Bool {
         if floatingNames.contains(name) { return true }
@@ -53,16 +57,20 @@ struct AppConfig {
             cfg.floatingNames = (fl["appNames"] as? [String]) ?? []
             cfg.floatingBundleIds = (fl["bundleIds"] as? [String]) ?? []
         }
+        if let gr = json["groups"] as? [String: [String]] {
+            cfg.groups = gr
+        }
         return cfg
     }
 
     // Schreibt die komplette Config zurück (für den Einstellungsdialog) —
-    // überschreibt bewusst die ganze Datei, "ignore"/"floating" sind die
-    // einzigen bekannten Schlüssel.
+    // überschreibt bewusst die ganze Datei, "ignore"/"floating"/"groups" sind
+    // die einzigen bekannten Schlüssel.
     func save() {
         let json: [String: Any] = [
             "ignore": ["appNames": ignoreNames, "bundleIds": ignoreBundleIds, "titlePatterns": ignoreTitlePatterns],
             "floating": ["appNames": floatingNames, "bundleIds": floatingBundleIds],
+            "groups": groups,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? FileManager.default.createDirectory(at: Self.path.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -77,7 +85,8 @@ struct AppConfig {
         let empty = """
         {
           "ignore": { "appNames": [], "bundleIds": [], "titlePatterns": [] },
-          "floating": { "appNames": [], "bundleIds": ["com.apple.finder", "com.apple.systempreferences"] }
+          "floating": { "appNames": [], "bundleIds": ["com.apple.finder", "com.apple.systempreferences"] },
+          "groups": {}
         }
         """
         try? empty.write(to: path, atomically: true, encoding: .utf8)
@@ -91,6 +100,9 @@ struct AppConfig {
           "floating": {
             "appNames": [],
             "bundleIds": ["com.apple.finder", "com.apple.systempreferences"]
+          },
+          "groups": {
+            "Work": ["Mail", "Slack", "Calendar"]
           }
         }
         """

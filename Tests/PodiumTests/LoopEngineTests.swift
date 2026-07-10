@@ -108,6 +108,32 @@ final class LoopEngineTests: XCTestCase {
         XCTAssertEqual(LoopEngine.allocateByWeight(total: 0, weights: [100, 200]), [0, 0])
     }
 
+    func testAssignBucketsEqualSizesEqualTargetsSpreadsOneEach() {
+        let result = LoopEngine.assignBucketsToDisplays(bucketSizes: [1, 1, 1, 1], targetCounts: [1, 1, 1, 1])
+        XCTAssertEqual(result, [0, 1, 2, 3])
+    }
+
+    func testAssignBucketsOneOversizedGroupForcedOntoOneDisplayAlone() {
+        // Gruppe von 4 übersteigt jedes einzelne Ziel (3) — muss trotzdem
+        // GANZ auf einen Monitor, die beiden Singles füllen den anderen.
+        let result = LoopEngine.assignBucketsToDisplays(bucketSizes: [4, 1, 1], targetCounts: [3, 3])
+        XCTAssertEqual(result, [0, 1, 1])
+    }
+
+    func testAssignBucketsMoreBucketsThanDisplaysBalancesByDeficit() {
+        let result = LoopEngine.assignBucketsToDisplays(bucketSizes: [2, 2, 2, 2, 2], targetCounts: [5, 5])
+        XCTAssertEqual(result, [0, 1, 0, 1, 0])
+    }
+
+    func testAssignBucketsEmptyInputReturnsEmpty() {
+        XCTAssertEqual(LoopEngine.assignBucketsToDisplays(bucketSizes: [], targetCounts: [5, 5]), [])
+    }
+
+    func testAssignBucketsSingleDisplayPutsEverythingThere() {
+        let result = LoopEngine.assignBucketsToDisplays(bucketSizes: [3, 2, 1], targetCounts: [7])
+        XCTAssertEqual(result, [0, 0, 0])
+    }
+
     func testEdgeThirdAndTwoThirds() {
         XCTAssertEqual(LoopEngine.frame(zone: .left, variant: .third, in: bounds).width, 328)
         XCTAssertEqual(LoopEngine.frame(zone: .left, variant: .twoThirds, in: bounds).width, 656)

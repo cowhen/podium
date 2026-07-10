@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DirectActions.register()
         DragSnapManager.shared.start()
         LinkedEdges.shared.start()
+        LinkedEdgeDrag.shared.start()
         RestoreCenter.shared.start()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: SettingsStore.changed, object: nil)

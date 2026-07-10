@@ -2,7 +2,7 @@ import AppKit
 
 // Zeigt oben links auf jedem Monitor dessen Nummer (1..N, dieselbe
 // Reihenfolge wie bei den Zifferntasten/Werfen) — reine Orientierungshilfe,
-// solange die Bühne ODER der Loop-Modus offen ist. Rein visuell
+// solange das Podium ODER der Loop-Modus offen ist. Rein visuell
 // (ignoresMouseEvents), ein Fenster pro Monitor.
 final class MonitorBadgeSet {
     private var windows: [NSWindow] = []
@@ -22,7 +22,7 @@ final class MonitorBadgeSet {
             win.isOpaque = false
             win.backgroundColor = .clear
             // Knapp UNTER dem Overlay-Fenster (.floating) — sichtbar über
-            // normalen Fenstern, verdeckt aber nie die Bühne (wie LoopPreviewPanel).
+            // normalen Fenstern, verdeckt aber nie das Podium (wie LoopPreviewPanel).
             win.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
             win.hasShadow = true
             win.ignoresMouseEvents = true

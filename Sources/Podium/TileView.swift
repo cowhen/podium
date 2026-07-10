@@ -1,7 +1,7 @@
 import AppKit
 
 // Eine Fenster-Kachel im Overlay: Thumbnail + zweizeiliges Label, ziehbar per
-// Maus. In der Karte mit Monitor-Akzentfarbe umrandet, auf der Bühne mit
+// Maus. In der Karte mit Monitor-Akzentfarbe umrandet, auf dem Podium mit
 // farbigem Punkt (= Monitor, auf dem das Fenster gerade liegt). Hover startet
 // den Vorschau-Zoom über den Controller.
 final class WindowTileView: NSView {

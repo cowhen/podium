@@ -13,11 +13,11 @@ enum Tuning {
     static let minWindowEdge: CGFloat = 120
     // Mindest-Langkante einer Monitor-Box in der Karte.
     static let minBoxLongEdge: CGFloat = 130
-    // Die Bühne unter der Karte bricht spätestens bei dieser Breite um.
+    // Die Podium unter der Karte bricht spätestens bei dieser Breite um.
     static let stageMaxWidthFloor: CGFloat = 560
     // Max. Fenster in der Split-Anordnung einer Box.
     static let maxAssigned = 4
-    // Bühnen-Kacheln (größer als früher die Zeilen-Kacheln — volle Breite verfügbar).
+    // Podiums-Kacheln (größer als früher die Zeilen-Kacheln — volle Breite verfügbar).
     static let stageTileSize = CGSize(width: 168, height: 112)
     // Hover-Zoom: Verzögerung bis zur großen Vorschau und deren Größe.
     static let hoverPreviewDelay: Double = 0.35
@@ -26,6 +26,22 @@ enum Tuning {
     static let almostMaximizeRatio: CGFloat = 0.9
     // Loop-Modus: sichtbarer Streifen eines gestashten Fensters am Bildschirmrand.
     static let stashSliver: CGFloat = 6
+
+    // MARK: Speed-Gated Linked Edges
+    // Ziehgeschwindigkeit statt gehaltener Taste entscheidet, ob Nachbarn beim
+    // Resizen mitgehen: darunter (pt/s der bewegten Kante) verbindet sich neu,
+    // darüber trennt sich — zwei getrennte Schwellen statt einer verhindern
+    // Flackern, wenn die Handgeschwindigkeit genau um einen Wert oszilliert
+    // (Hysterese, wie bei Apples eigenem 3D-Touch-Schwellenwert). Startwerte,
+    // brauchen noch echtes Antesten mit realer Maus/Trackpad.
+    static let linkedEdgeEngageVelocity: CGFloat = 250
+    static let linkedEdgeDisengageVelocity: CGFloat = 550
+    // Glättungsfaktor (0…1) für den exponentiell gleitenden Mittelwert der
+    // Geschwindigkeit — dämpft Ausreißer aus einzelnen, ungleichmäßig
+    // getakteten Maus-Samples, ohne träge zu wirken.
+    static let linkedEdgeVelocitySmoothing: CGFloat = 0.35
+    // Ein-/Ausblenden der Live-Vorschau-Panels: eased statt hartem Schnitt.
+    static let linkedEdgePreviewFadeDuration: Double = 0.18
 }
 
 // Überlappungsanteil relativ zur kleineren der beiden Flächen — so zählt ein
